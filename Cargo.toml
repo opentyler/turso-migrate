@@ -1,0 +1,23 @@
+[package]
+name = "turso-migrate"
+version = "0.1.0"
+description = "Declarative schema convergence for Turso/libSQL databases"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/opentyler/turso-migrate"
+rust-version = "1.85"
+authors = ["Tyler <tyler@root-platform.app>"]
+publish = false
+
+[dependencies]
+turso = { version = "0.5.0-pre.13", features = ["sync"] }
+turso_core = { version = "0.5.0-pre.13", features = ["fts", "fs", "conn_raw_api"] }
+blake3 = "1"
+tracing = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+blake3 = "1"
