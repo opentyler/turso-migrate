@@ -261,16 +261,9 @@ Tests use in-memory Turso databases — no external services needed. The test su
 - Legacy bridge (sequential migration table detection)
 - Error handling (empty SQL, invalid SQL, missing files)
 
-## Inspiration & References
+## Inspiration
 
 - [Simple declarative schema migration for SQLite (Rothlis & Manley, 2022)](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) — **The direct inspiration for turso-migrate.** Python implementation of the same core algorithm: pristine DB from schema SQL → introspect both → diff → converge. turso-migrate extends this with BLAKE3 fast-path, crash recovery, FTS/vector/view/trigger support, and FK-aware ordering. See "Comparison with the Original" above for a detailed breakdown.
-- [Declarative vs Versioned Migrations (Atlas)](https://atlasgo.io/concepts/declarative-vs-versioned) — The declarative migration paradigm that turso-migrate implements
-- [Deep Dive into Declarative Migrations (Atlas)](https://atlasgo.io/blog/2024/10/31/declarative-migrations-deepdive) — Design philosophy and challenges
-- [Database per User (Turso)](https://turso.tech/blog/give-each-of-your-users-their-own-sqlite-database-b74445f4) — The per-user database architecture that motivated constant-cost convergence
-- [SQLite as an Application File Format](https://www.sqlite.org/appfileformat.html) — Why SQLite (and Turso) for embedded databases
-- [All-In on Server-Side SQLite (Fly.io)](https://fly.io/blog/all-in-on-sqlite-litestream/) — The server-side SQLite movement
-- [BLAKE3 Hash Function](https://github.com/BLAKE3-team/BLAKE3) — Fast content-addressable hashing for schema change detection
-- [SQLx — Compile-time Checked SQL (Launchbadge)](https://github.com/launchbadge/sqlx) — Inspiration for compile-time SQL tooling in Rust
 
 ## License
 
