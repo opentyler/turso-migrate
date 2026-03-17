@@ -262,12 +262,105 @@ fn is_create_view_or_trigger(stmt: &str) -> bool {
 }
 
 fn is_create_view(stmt: &str) -> bool {
-    let normalized = stmt.trim_start().to_ascii_lowercase();
-    normalized.starts_with("create view") || normalized.starts_with("create materialized view")
+    classify_create_stmt(stmt)
+        .map(|kind| kind == "view")
+        .unwrap_or(false)
 }
 
 fn is_create_trigger(stmt: &str) -> bool {
-    stmt.trim_start()
-        .to_ascii_lowercase()
-        .starts_with("create trigger")
+    classify_create_stmt(stmt)
+        .map(|kind| kind == "trigger")
+        .unwrap_or(false)
+}
+
+fn classify_create_stmt(stmt: &str) -> Option<&'static str> {
+    let normalized = strip_leading_sql_comments(stmt);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    if tokens.first() != Some(&"create") {
+        return None;
+    }
+
+    let mut idx = 1;
+    if matches!(tokens.get(idx), Some(&"temp") | Some(&"temporary")) {
+        idx += 1;
+    }
+
+    match tokens.get(idx) {
+        Some(&"view") => Some("view"),
+        Some(&"materialized") if tokens.get(idx + 1) == Some(&"view") => Some("view"),
+        Some(&"trigger") => Some("trigger"),
+        _ => None,
+    }
+}
+
+fn strip_leading_sql_comments(input: &str) -> &str {
+    let mut rest = input;
+    loop {
+        let trimmed = rest.trim_start();
+        if let Some(after) = trimmed.strip_prefix("--") {
+            if let Some(pos) = after.find('\n') {
+                rest = &after[pos + 1..];
+                continue;
+            }
+            return "";
+        }
+
+        if let Some(after) = trimmed.strip_prefix("/*") {
+            if let Some(pos) = after.find("*/") {
+                rest = &after[pos + 2..];
+                continue;
+            }
+            return "";
+        }
+
+        return trimmed;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_create_trigger, is_create_view};
+
+    #[test]
+    fn classify_temp_view() {
+        assert!(is_create_view("CREATE TEMP VIEW v AS SELECT 1"));
+    }
+
+    #[test]
+    fn classify_temporary_trigger() {
+        assert!(is_create_trigger(
+            "CREATE TEMPORARY TRIGGER trg AFTER INSERT ON t BEGIN SELECT 1; END"
+        ));
+    }
+
+    #[test]
+    fn classify_with_if_not_exists() {
+        assert!(is_create_view("CREATE VIEW IF NOT EXISTS v AS SELECT 1"));
+        assert!(is_create_trigger(
+            "CREATE TRIGGER IF NOT EXISTS trg AFTER INSERT ON t BEGIN SELECT 1; END"
+        ));
+    }
+
+    #[test]
+    fn classify_with_leading_comments() {
+        let view_stmt = "-- comment\nCREATE TEMP VIEW v AS SELECT 1";
+        let trigger_stmt = "/* block */\nCREATE TRIGGER trg AFTER INSERT ON t BEGIN SELECT 1; END";
+        assert!(is_create_view(view_stmt));
+        assert!(is_create_trigger(trigger_stmt));
+    }
+
+    #[test]
+    fn classify_does_not_false_positive_on_create_table() {
+        assert!(!is_create_view(
+            "CREATE TABLE view_metadata (id TEXT PRIMARY KEY)"
+        ));
+        assert!(!is_create_trigger(
+            "CREATE TABLE trigger_log (id TEXT PRIMARY KEY)"
+        ));
+    }
 }

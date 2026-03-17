@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = turso::Builder::new_local("my.db")
         .experimental_index_method(true)
         .experimental_materialized_views(true)
+        .experimental_triggers(true)
         .build()
         .await?;
     let conn = db.connect()?;
@@ -461,7 +462,7 @@ This means:
 
 **COLLATE detection is SQL-based.** Extracts COLLATE clauses from CREATE TABLE SQL using pattern matching, not a full SQL parser. Unusual formatting could be missed.
 
-**FTS requires experimental Turso flags.** Set `.experimental_index_method(true)` and `.experimental_materialized_views(true)` on your `turso::Builder`.
+**FTS + triggers require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`.
 
 ## Running Tests
 
@@ -469,7 +470,7 @@ This means:
 cargo test
 ```
 
-99 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
+113 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
 
 ## CLI
 

@@ -81,6 +81,10 @@ pub async fn converge_with_options(
     )
     .await;
 
+    if let Err(err) = &result {
+        maybe_cleanup_pre_ddl_failure(conn, &lease_id, err).await;
+    }
+
     release_lease(conn, &lease_id).await;
 
     result
@@ -114,7 +118,7 @@ async fn run_slow_path(
         if destructive.has_changes()
             && let Some(target) = &options.backup_before_destructive
         {
-            write_schema_backup(target, &actual.to_sql())?;
+            write_schema_backup(target, &actual.to_sql()).await?;
         }
 
         if let Some(hook) = &options.pre_destructive_hook {
@@ -361,6 +365,50 @@ async fn release_lease(conn: &turso::Connection, lease_id: &str) {
     }
 }
 
+async fn maybe_cleanup_pre_ddl_failure(
+    conn: &turso::Connection,
+    lease_id: &str,
+    err: &MigrateError,
+) {
+    let phase = get_meta(conn, "migration_phase").await.ok().flatten();
+    if !is_pre_ddl_failure(err, phase.as_deref()) {
+        return;
+    }
+
+    let owner = get_meta(conn, "migration_owner").await.ok().flatten();
+    if owner.as_deref() != Some(lease_id) {
+        return;
+    }
+
+    if conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+        return;
+    }
+
+    let cleanup_result = async {
+        delete_meta(conn, "migration_in_progress").await?;
+        delete_meta(conn, "migration_phase").await?;
+        Ok::<(), MigrateError>(())
+    }
+    .await;
+
+    if cleanup_result.is_err() {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return;
+    }
+
+    let _ = conn.execute("COMMIT", ()).await;
+}
+
+fn is_pre_ddl_failure(err: &MigrateError, phase: Option<&str>) -> bool {
+    match phase {
+        Some("complete") => false,
+        Some("ddl") => {
+            matches!(err, MigrateError::InjectedFailure { failpoint } if failpoint == Failpoint::BeforeExecute.as_str())
+        }
+        _ => true,
+    }
+}
+
 async fn detect_drift(conn: &turso::Connection) -> Result<bool, MigrateError> {
     let result = conn.query("PRAGMA schema_version", ()).await;
     let current_sv = match result {
@@ -501,10 +549,12 @@ pub async fn converge_from_path(
     path: impl AsRef<Path>,
 ) -> Result<(), MigrateError> {
     let path = path.as_ref();
-    let contents = std::fs::read_to_string(path).map_err(|source| MigrateError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|source| MigrateError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     converge(conn, &contents).await
 }
 
@@ -514,8 +564,9 @@ pub async fn schema_version(conn: &turso::Connection) -> Result<u32, MigrateErro
         .await?;
 
     if let Some(row) = rows.next().await? {
-        let version: i32 = row.get(0)?;
-        Ok(version as u32)
+        let version: i64 = row.get(0)?;
+        u32::try_from(version)
+            .map_err(|_| MigrateError::Schema(format!("invalid schema_version value: {version}")))
     } else {
         Ok(0)
     }
@@ -528,8 +579,10 @@ async fn increment_schema_version(conn: &turso::Connection) -> Result<(), Migrat
     )
     .await?;
 
-    let current = schema_version(conn).await.unwrap_or(0);
-    let next = current + 1;
+    let current = schema_version(conn).await?;
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| MigrateError::Schema("schema_version overflow".to_string()))?;
     let now = epoch_secs().to_string();
 
     conn.execute("DELETE FROM schema_version", ()).await?;
@@ -603,35 +656,41 @@ fn is_read_only_error(err: &MigrateError) -> bool {
         || lower.contains("attempt to write a readonly database")
 }
 
-fn write_schema_backup(path_hint: &Path, schema_sql: &str) -> Result<(), MigrateError> {
-    let meta = std::fs::metadata(path_hint);
+async fn write_schema_backup(path_hint: &Path, schema_sql: &str) -> Result<(), MigrateError> {
+    let meta = tokio::fs::metadata(path_hint).await;
     let treat_as_dir = meta
         .as_ref()
         .map(|m| m.is_dir())
         .unwrap_or_else(|_| path_hint.extension().is_none());
 
     let output_path = if treat_as_dir {
-        std::fs::create_dir_all(path_hint).map_err(|source| MigrateError::Io {
-            path: path_hint.to_path_buf(),
-            source,
-        })?;
+        tokio::fs::create_dir_all(path_hint)
+            .await
+            .map_err(|source| MigrateError::Io {
+                path: path_hint.to_path_buf(),
+                source,
+            })?;
         path_hint.join(format!("turso_migrate_backup_{}.sql", epoch_secs()))
     } else {
         if let Some(parent) = path_hint.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent).map_err(|source| MigrateError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|source| MigrateError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
         }
         path_hint.to_path_buf()
     };
 
-    std::fs::write(&output_path, schema_sql).map_err(|source| MigrateError::Io {
-        path: output_path,
-        source,
-    })
+    tokio::fs::write(&output_path, schema_sql)
+        .await
+        .map_err(|source| MigrateError::Io {
+            path: output_path,
+            source,
+        })
 }
 
 async fn apply_data_migrations(

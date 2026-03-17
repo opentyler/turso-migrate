@@ -415,9 +415,85 @@ async fn failpoint_injection_aborts_then_recovery_succeeds() {
         MigrateError::InjectedFailure { failpoint } if failpoint == "before_execute"
     ));
 
+    let in_progress = get_meta(&conn, "migration_in_progress").await;
+    let phase = get_meta(&conn, "migration_phase").await;
+    assert!(
+        in_progress.is_none(),
+        "pre-DDL failure should clear migration_in_progress"
+    );
+    assert!(
+        phase.is_none(),
+        "pre-DDL failure should clear migration_phase"
+    );
+
     converge(&conn, test_schema()).await.unwrap();
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert_eq!(snap.tables.len(), 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failpoint_after_execute_preserves_crash_recovery_state() {
+    let (_db, conn) = empty_db().await;
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        failpoint: Some(Failpoint::AfterExecuteBeforeState),
+        ..Default::default()
+    };
+
+    let err = converge_with_options(&conn, test_schema(), &options)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MigrateError::InjectedFailure { failpoint } if failpoint == "after_execute_before_state"
+    ));
+
+    let in_progress = get_meta(&conn, "migration_in_progress").await;
+    assert_eq!(in_progress.as_deref(), Some("1"));
+
+    let recover_options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        ..Default::default()
+    };
+    let report = converge_with_options(&conn, test_schema(), &recover_options)
+        .await
+        .unwrap();
+    assert_eq!(report.mode, ConvergeMode::CrashRecovery);
+
+    let cleared = get_meta(&conn, "migration_in_progress").await;
+    assert!(cleared.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_version_overflow_returns_error() {
+    let (_db, conn) = empty_db().await;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("DELETE FROM schema_version", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "INSERT INTO schema_version (version, updated_at) VALUES (?1, ?2)",
+        (u32::MAX as i64, "0"),
+    )
+    .await
+    .unwrap();
+
+    let schema = "\
+        CREATE TABLE foo (id TEXT PRIMARY KEY);\n\
+        CREATE TABLE schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL);";
+
+    let err = converge(&conn, schema).await.unwrap_err();
+    assert!(
+        err.to_string().contains("schema_version overflow"),
+        "expected overflow error, got: {err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

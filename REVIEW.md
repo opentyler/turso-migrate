@@ -3,7 +3,23 @@
 **Date**: 2026-03-17
 **Reviewer**: Automated multi-agent review (Sisyphus + Oracle)
 **Codebase**: turso-migrate v0.1.0 @ main
-**Test Baseline**: 61 tests, all passing
+**Test Baseline**: 113 tests, all passing
+
+## Remediation Status (2026-03-17)
+
+The following review findings were remediated in the current pass:
+
+- ✅ **P0: `migration_in_progress` cleanup on failures** — Added stage-aware cleanup in `converge_with_options` so pre-DDL failures clear `migration_in_progress`/`migration_phase`, while post-DDL failures preserve crash-recovery state.
+- ✅ **P0: temp table collision in rebuild flow** — Planner now emits `DROP TABLE IF EXISTS "_converge_new_*"` before temp rebuild table creation.
+- ✅ **P1: blocking I/O in async path** — `converge_from_path` and backup writing now use `tokio::fs` async APIs.
+- ✅ **Oracle P2: view/trigger statement classification robustness** — Replaced prefix checks with token-based classifier that handles leading comments and TEMP/TEMPORARY forms.
+- ✅ **Schema version hardening** — Removed `unwrap_or(0)`, added overflow checks with `checked_add`, and validated schema version type conversion.
+
+Validation added with targeted regression tests in:
+
+- `tests/converge.rs` (pre/post-DDL failpoint behavior, overflow)
+- `tests/execute.rs` (defensive temp-table drop assertion)
+- `src/bin/turso-migrate.rs` (CLI local connection trigger DDL support)
 
 ---
 

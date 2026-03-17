@@ -169,6 +169,11 @@ pub fn generate_plan(
 
             let temp_table_name = make_temp_table_name(table_name);
 
+            transactional_stmts.push(format!(
+                "DROP TABLE IF EXISTS {}",
+                quote_ident(&temp_table_name)
+            ));
+
             if actual_table.has_autoincrement {
                 transactional_stmts.push(format!(
                     "INSERT OR REPLACE INTO _schema_meta (key, value) \

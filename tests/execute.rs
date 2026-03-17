@@ -199,6 +199,13 @@ async fn rebuild_temp_table_name_uses_unique_suffix() {
             .any(|s| s.to_ascii_lowercase().contains("_converge_new_foo_")),
         "rebuild temp table should include unique suffix"
     );
+    assert!(
+        plan.transactional_stmts.iter().any(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower.starts_with("drop table if exists \"_converge_new_foo_")
+        }),
+        "rebuild should defensively drop stale temp table before CREATE"
+    );
 }
 
 #[tokio::test]

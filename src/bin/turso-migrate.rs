@@ -120,6 +120,7 @@ async fn open_local_connection(path: &str) -> Result<turso::Connection, String> 
     let db = turso::Builder::new_local(path)
         .experimental_index_method(true)
         .experimental_materialized_views(true)
+        .experimental_triggers(true)
         .build()
         .await
         .map_err(|e| format!("failed to open database {}: {e}", Path::new(path).display()))?;
@@ -131,4 +132,27 @@ fn print_usage() {
     println!(
         "turso-migrate <command> [args]\n\nCommands:\n  validate <schema.sql>\n  diff <db-path> <schema.sql>\n  plan <db-path> <schema.sql>\n  check <db-path> <schema.sql>\n  apply <db-path> <schema.sql>"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_local_connection;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_local_connection_supports_trigger_ddl() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cli_trigger_test.db");
+        let db_path_str = db_path.to_string_lossy().to_string();
+
+        let conn = open_local_connection(&db_path_str).await.unwrap();
+        conn.execute("CREATE TABLE t (id TEXT PRIMARY KEY)", ())
+            .await
+            .unwrap();
+        conn.execute(
+            "CREATE TRIGGER trg_t AFTER INSERT ON t BEGIN SELECT 1; END",
+            (),
+        )
+        .await
+        .unwrap();
+    }
 }
