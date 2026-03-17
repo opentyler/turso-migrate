@@ -151,20 +151,6 @@ Reads a schema file from disk, then converges using the permissive policy.
 turso_migrate::converge_from_path(&conn, "schemas/turso_schema.sql").await?;
 ```
 
-### `Migrator` — Builder API
-
-Separate builder API with its own deletion protection. Useful for dry-runs via `plan()`.
-
-```rust
-use turso_migrate::Migrator;
-
-let migrator = Migrator::new(schema_sql)
-    .allow_deletions(false);  // Don't drop unknown tables
-
-let plan = migrator.plan(&conn).await?;   // Preview without applying
-let plan = migrator.migrate(&conn).await?; // Apply
-```
-
 ### `SchemaDiff` — Human-Readable Diff
 
 The diff engine produces a `SchemaDiff` with a `Display` implementation for human-readable output:
@@ -367,7 +353,7 @@ This means:
 cargo test
 ```
 
-79 tests covering: convergence, diff (12 categories + edge cases), plan generation, execution (3 phases), introspection (table_xinfo, FK, UNIQUE, COLLATE), schema round-trip, policy enforcement, dry-run, drift detection, crash recovery, SQL normalization, and the legacy bridge. In-memory Turso databases, no external services.
+76 tests covering: convergence, diff (12 categories + edge cases), plan generation, execution (3 phases), introspection (table_xinfo, FK, UNIQUE, COLLATE), schema round-trip, policy enforcement, dry-run, drift detection, crash recovery, SQL normalization, and the legacy bridge. In-memory Turso databases, no external services.
 
 ## Background
 

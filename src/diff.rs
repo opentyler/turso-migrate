@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::schema::{ColumnInfo, SchemaSnapshot};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDiff {
     pub tables_to_create: Vec<String>,
     pub tables_to_drop: Vec<String>,

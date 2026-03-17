@@ -68,7 +68,7 @@ impl std::hash::Hash for CIString {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaSnapshot {
     pub tables: BTreeMap<CIString, TableInfo>,
     pub indexes: BTreeMap<CIString, IndexInfo>,
@@ -111,7 +111,7 @@ impl SchemaSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableInfo {
     pub name: String,
     pub sql: String,
@@ -132,7 +132,7 @@ impl TableInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnInfo {
     pub name: String,
     pub col_type: String,
@@ -155,7 +155,7 @@ impl ColumnInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKey {
     pub from_columns: Vec<String>,
     pub to_table: String,
@@ -164,7 +164,7 @@ pub struct ForeignKey {
     pub on_update: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexInfo {
     pub name: String,
     pub table_name: String,
@@ -174,14 +174,14 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewInfo {
     pub name: String,
     pub sql: String,
     pub is_materialized: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerInfo {
     pub name: String,
     pub table_name: String,

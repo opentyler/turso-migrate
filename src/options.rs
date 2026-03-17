@@ -78,7 +78,7 @@ impl Default for ConvergeReport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConvergeMode {
     FastPath,
     SlowPath,
