@@ -216,6 +216,8 @@ All operations return `Result<_, MigrateError>`:
 | `ForeignKeyViolation { table, rowid, parent }` | FK check failed after rebuild | Table, row, and referenced parent |
 | `Schema(String)` | Schema validation error (e.g., NOT NULL without DEFAULT) | Descriptive message |
 | `PolicyViolation { message, blocked_operations }` | Policy blocked a destructive change | What was blocked and why |
+| `MigrationBusy { owner, remaining_secs }` | Another migration holds the lease | Owner ID and seconds until expiry |
+| `UnsupportedFeature(String)` | Schema uses FTS/vector/materialized views but target lacks support | Descriptive message |
 
 ## How It Works
 
@@ -255,8 +257,11 @@ Adding a `NOT NULL` column without a `DEFAULT` value to an existing table is cau
 ### Schema Drift Detection
 Even when the desired schema hash matches, turso-migrate checks `PRAGMA schema_version` to detect out-of-band changes (manual SQL, admin operations, replica divergence). If drift is detected, it forces a full convergence to correct the database.
 
+### Migration Lease (Concurrency Protection)
+Only one migration runs at a time per database. `converge_with_options` acquires a cooperative lease in `_schema_meta` (owner + TTL) before entering the slow path. If another process holds the lease, the caller gets `MigrateError::MigrationBusy` with the owner and time remaining. The lease expires automatically after 5 minutes (crash recovery). Phase tracking (`migration_phase`) records progress for unambiguous crash recovery.
+
 ### Crash Recovery
-If a migration is interrupted, the `migration_in_progress` flag forces a full re-convergence on the next connection. Internal temp tables (`_converge_new_*`) are filtered from introspection to prevent crash artifacts from corrupting the diff.
+If a migration is interrupted, the `migration_in_progress` flag and phase cursor force a full re-convergence on the next connection. Internal temp tables (`_converge_new_*`) are filtered from introspection to prevent crash artifacts from corrupting the diff.
 
 ### Atomic State Updates
 Hash, schema version, and the in-progress flag are updated in a single `BEGIN IMMEDIATE` / `COMMIT` transaction. A crash between these updates is impossible.
@@ -289,6 +294,9 @@ Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT c
 | AUTOINCREMENT | ✅ (sequence preserved across rebuilds) |
 | UNIQUE constraints | ✅ (via PRAGMA index_list) |
 | ADD COLUMN (nullable or with DEFAULT) | ✅ (O(1), no rebuild) |
+| DROP COLUMN (eligible columns) | ✅ (O(1) when not PK/indexed/FK-referenced/view-referenced) |
+| Feature preflight validation | ✅ (FTS, vector, materialized view checks) |
+| Migration lease (concurrency) | ✅ (cooperative lease in _schema_meta) |
 | Destructive change protection | ✅ (ConvergePolicy) |
 | Dry-run mode | ✅ (plan without executing) |
 | Crash recovery | ✅ (`migration_in_progress` flag) |
@@ -385,7 +393,7 @@ This means:
 cargo test
 ```
 
-76 tests covering: convergence, diff (12 categories + edge cases), plan generation, execution (3 phases), introspection (table_xinfo, FK, UNIQUE, COLLATE), schema round-trip, policy enforcement, dry-run, drift detection, crash recovery, SQL normalization, and the legacy bridge. In-memory Turso databases, no external services.
+78 tests covering: convergence, diff (12 categories + edge cases), plan generation, execution (3 phases), introspection (table_xinfo, FK, UNIQUE, COLLATE), schema round-trip, policy enforcement, dry-run, drift detection, crash recovery, SQL normalization, and the legacy bridge. In-memory Turso databases, no external services.
 
 ## Background
 

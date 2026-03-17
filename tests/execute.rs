@@ -107,7 +107,10 @@ async fn table_rebuild_preserves_data() {
     let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    assert!(diff.tables_to_rebuild.contains(&"foo".to_string()));
+    assert!(
+        !diff.columns_to_drop.is_empty() || !diff.tables_to_rebuild.is_empty(),
+        "Should detect column removal via DROP COLUMN or rebuild"
+    );
 
     let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
@@ -219,8 +222,8 @@ async fn fk_referenced_table_rebuild_preserves_integrity() {
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
     assert!(
-        diff.tables_to_rebuild.contains(&"parent".to_string()),
-        "Parent should be rebuilt (old_col removed)"
+        !diff.columns_to_drop.is_empty() || !diff.tables_to_rebuild.is_empty(),
+        "Parent should have old_col removal detected"
     );
 
     let plan = generate_plan(&diff, &desired, &actual).unwrap();
@@ -288,7 +291,10 @@ async fn materialized_view_recreated_after_table_change() {
     let desired = SchemaSnapshot::from_schema_sql(schema_v2).await.unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    assert!(diff.tables_to_rebuild.contains(&"items".to_string()));
+    assert!(
+        !diff.columns_to_drop.is_empty() || !diff.tables_to_rebuild.is_empty(),
+        "Should detect items column removal"
+    );
 
     let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
@@ -381,8 +387,10 @@ async fn rebuild_with_notnull_default_column_applies_default() {
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
     assert!(
-        diff.tables_to_rebuild.contains(&"foo".to_string()),
-        "Removing old_col + adding status should trigger rebuild"
+        !diff.columns_to_drop.is_empty()
+            || !diff.columns_to_add.is_empty()
+            || !diff.tables_to_rebuild.is_empty(),
+        "Should detect column changes (drop old_col + add status)"
     );
 
     let plan = generate_plan(&diff, &desired, &actual).unwrap();
@@ -404,15 +412,18 @@ async fn rebuild_with_notnull_default_column_applies_default() {
 async fn rebuild_with_self_referential_fk_succeeds() {
     let (_db, conn) = empty_db().await;
     conn.execute(
-        "CREATE TABLE categories (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT REFERENCES categories(id), old_col TEXT)",
+        "CREATE TABLE categories (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT REFERENCES categories(id), old_col INTEGER)",
         (),
     )
     .await
     .unwrap();
-    conn.execute("INSERT INTO categories VALUES ('1', 'root', NULL, 'x')", ())
+    conn.execute("CREATE INDEX idx_cat_old ON categories(old_col)", ())
         .await
         .unwrap();
-    conn.execute("INSERT INTO categories VALUES ('2', 'child', '1', 'y')", ())
+    conn.execute("INSERT INTO categories VALUES ('1', 'root', NULL, 1)", ())
+        .await
+        .unwrap();
+    conn.execute("INSERT INTO categories VALUES ('2', 'child', '1', 2)", ())
         .await
         .unwrap();
 
@@ -420,7 +431,11 @@ async fn rebuild_with_self_referential_fk_succeeds() {
     let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    assert!(diff.tables_to_rebuild.contains(&"categories".to_string()));
+    assert!(
+        diff.tables_to_rebuild.contains(&"categories".to_string()),
+        "Indexed column removal should force rebuild: {:?}",
+        diff
+    );
 
     let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();

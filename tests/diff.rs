@@ -164,7 +164,7 @@ fn added_notnull_no_default_triggers_rebuild() {
 }
 
 #[test]
-fn removed_column_triggers_rebuild() {
+fn removed_eligible_column_uses_drop_column() {
     let mut desired = empty_snapshot();
     let mut actual = empty_snapshot();
 
@@ -184,7 +184,79 @@ fn removed_column_triggers_rebuild() {
     );
 
     let diff = compute_diff(&desired, &actual);
+    assert!(diff.tables_to_rebuild.is_empty(), "Should NOT rebuild");
+    assert_eq!(diff.columns_to_drop.len(), 1);
+    assert_eq!(
+        diff.columns_to_drop[0],
+        ("foo".to_string(), "legacy".to_string())
+    );
+}
+
+#[test]
+fn removed_pk_column_triggers_rebuild() {
+    let mut desired = empty_snapshot();
+    let mut actual = empty_snapshot();
+
+    desired.tables.insert(
+        ci("foo"),
+        make_table("foo", vec![make_column("name", "TEXT", false, None, 0)]),
+    );
+    actual.tables.insert(
+        ci("foo"),
+        make_table(
+            "foo",
+            vec![
+                make_column("id", "TEXT", true, None, 1),
+                make_column("name", "TEXT", false, None, 0),
+            ],
+        ),
+    );
+
+    let diff = compute_diff(&desired, &actual);
     assert_eq!(diff.tables_to_rebuild, vec!["foo".to_string()]);
+    assert!(
+        diff.columns_to_drop.is_empty(),
+        "PK column cannot use DROP COLUMN"
+    );
+}
+
+#[test]
+fn removed_indexed_column_triggers_rebuild() {
+    let mut desired = empty_snapshot();
+    let mut actual = empty_snapshot();
+
+    desired.tables.insert(
+        ci("foo"),
+        make_table("foo", vec![make_column("id", "TEXT", true, None, 1)]),
+    );
+    actual.tables.insert(
+        ci("foo"),
+        make_table(
+            "foo",
+            vec![
+                make_column("id", "TEXT", true, None, 1),
+                make_column("status", "TEXT", false, None, 0),
+            ],
+        ),
+    );
+    actual.indexes.insert(
+        ci("idx_foo_status"),
+        IndexInfo {
+            name: "idx_foo_status".to_string(),
+            table_name: "foo".to_string(),
+            sql: "CREATE INDEX idx_foo_status ON foo(status)".to_string(),
+            is_fts: false,
+            is_unique: false,
+            columns: vec!["status".to_string()],
+        },
+    );
+
+    let diff = compute_diff(&desired, &actual);
+    assert_eq!(diff.tables_to_rebuild, vec!["foo".to_string()]);
+    assert!(
+        diff.columns_to_drop.is_empty(),
+        "Indexed column cannot use DROP COLUMN"
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::diff::normalize_for_hash;
 use crate::options::{ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport};
-use crate::schema::SchemaSnapshot;
+use crate::schema::{Capabilities, SchemaSnapshot};
 use crate::{MigrateError, compute_diff, generate_plan};
 
 pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), MigrateError> {
@@ -48,7 +48,32 @@ pub async fn converge_with_options(
         tracing::warn!("converge: crash recovery detected, forcing slow-path");
     }
 
-    set_meta(conn, "migration_in_progress", "1").await?;
+    let lease_id = acquire_lease(conn).await?;
+
+    let result = run_slow_path(
+        conn,
+        schema_sql,
+        &schema_hash,
+        options,
+        is_crash_recovery,
+        start,
+    )
+    .await;
+
+    release_lease(conn, &lease_id).await;
+
+    result
+}
+
+async fn run_slow_path(
+    conn: &turso::Connection,
+    schema_sql: &str,
+    schema_hash: &str,
+    options: &ConvergeOptions,
+    is_crash_recovery: bool,
+    start: Instant,
+) -> Result<ConvergeReport, MigrateError> {
+    set_meta(conn, "migration_phase", "introspect").await?;
 
     tracing::info!("converge: slow-path, computing diff");
     let desired = SchemaSnapshot::from_schema_sql(schema_sql).await?;
@@ -60,11 +85,15 @@ pub async fn converge_with_options(
     if had_ddl {
         check_policy(&diff, &options.policy)?;
 
+        let caps = Capabilities::detect(conn).await.unwrap_or_default();
+        validate_features(&desired, &caps)?;
+
         tracing::info!(
             tables_create = diff.tables_to_create.len(),
             tables_drop = diff.tables_to_drop.len(),
             tables_rebuild = diff.tables_to_rebuild.len(),
             columns_add = diff.columns_to_add.len(),
+            columns_drop = diff.columns_to_drop.len(),
             "converge: generating migration plan"
         );
 
@@ -87,15 +116,19 @@ pub async fn converge_with_options(
             });
         }
 
+        set_meta(conn, "migration_phase", "ddl").await?;
+
         tracing::info!(
             transactional = plan.transactional_stmts.len(),
             non_transactional = plan.non_transactional_stmts.len(),
             "converge: executing migration plan"
         );
         crate::execute::execute_plan_with_timeout(conn, &plan, options.busy_timeout).await?;
+
+        set_meta(conn, "migration_phase", "complete").await?;
     }
 
-    update_state_atomically(conn, &schema_hash, had_ddl).await?;
+    update_state_atomically(conn, schema_hash, had_ddl).await?;
 
     let mode = if is_crash_recovery {
         ConvergeMode::CrashRecovery
@@ -139,6 +172,20 @@ fn check_policy(
         });
     }
 
+    if !policy.allow_column_drops && !diff.columns_to_drop.is_empty() {
+        return Err(MigrateError::PolicyViolation {
+            message: format!(
+                "Would drop {} column(s). Set allow_column_drops=true to permit.",
+                diff.columns_to_drop.len(),
+            ),
+            blocked_operations: diff
+                .columns_to_drop
+                .iter()
+                .map(|(t, c)| format!("DROP COLUMN {t}.{c}"))
+                .collect(),
+        });
+    }
+
     if let Some(max) = policy.max_tables_affected {
         let total =
             diff.tables_to_create.len() + diff.tables_to_drop.len() + diff.tables_to_rebuild.len();
@@ -153,6 +200,93 @@ fn check_policy(
     }
 
     Ok(())
+}
+
+fn validate_features(desired: &SchemaSnapshot, caps: &Capabilities) -> Result<(), MigrateError> {
+    let has_fts = desired.indexes.values().any(|i| i.is_fts);
+    let has_materialized = desired.views.values().any(|v| v.is_materialized);
+    let has_vector = desired.tables.values().any(|t| {
+        t.columns
+            .iter()
+            .any(|c| c.col_type.to_ascii_lowercase().starts_with("vector"))
+    });
+
+    if has_fts && !caps.has_fts_module {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses FTS indexes but the target connection lacks the FTS module. \
+             Ensure .experimental_index_method(true) is set on your turso::Builder."
+                .into(),
+        ));
+    }
+    if has_materialized && !caps.has_materialized_views {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses materialized views but the target connection doesn't support them. \
+             Ensure .experimental_materialized_views(true) is set on your turso::Builder."
+                .into(),
+        ));
+    }
+    if has_vector && !caps.has_vector_module {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses vector columns but the target connection lacks the vector module.".into(),
+        ));
+    }
+    Ok(())
+}
+
+const LEASE_TTL_SECS: u64 = 300;
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn acquire_lease(conn: &turso::Connection) -> Result<String, MigrateError> {
+    let lease_id = format!("{}_{}", std::process::id(), epoch_secs());
+    let now = epoch_secs();
+    let expiry = now + LEASE_TTL_SECS;
+
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+
+    let existing_owner = get_meta(conn, "migration_owner").await?;
+    let existing_expiry = get_meta(conn, "migration_lease_until").await?;
+
+    let lease_active = if let (Some(_owner), Some(exp_str)) = (&existing_owner, &existing_expiry) {
+        let exp: u64 = exp_str.parse().unwrap_or(0);
+        exp > now
+    } else {
+        false
+    };
+
+    if lease_active {
+        let exp: u64 = existing_expiry
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let remaining = exp.saturating_sub(now);
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(MigrateError::MigrationBusy {
+            owner: existing_owner.unwrap_or_default(),
+            remaining_secs: remaining,
+        });
+    }
+
+    set_meta(conn, "migration_owner", &lease_id).await?;
+    set_meta(conn, "migration_lease_until", &expiry.to_string()).await?;
+    set_meta(conn, "migration_in_progress", "1").await?;
+    conn.execute("COMMIT", ()).await?;
+
+    Ok(lease_id)
+}
+
+async fn release_lease(conn: &turso::Connection, lease_id: &str) {
+    if let Ok(Some(current)) = get_meta(conn, "migration_owner").await {
+        if current == lease_id {
+            let _ = delete_meta(conn, "migration_owner").await;
+            let _ = delete_meta(conn, "migration_lease_until").await;
+        }
+    }
 }
 
 async fn detect_drift(conn: &turso::Connection) -> Result<bool, MigrateError> {
@@ -217,6 +351,7 @@ async fn update_state_atomically(
     if let Err(e) = async {
         set_meta(conn, "schema_hash", schema_hash).await?;
         delete_meta(conn, "migration_in_progress").await?;
+        delete_meta(conn, "migration_phase").await?;
 
         if had_ddl {
             increment_schema_version(conn).await?;
@@ -270,11 +405,7 @@ pub async fn schema_version(conn: &turso::Connection) -> Result<u32, MigrateErro
 async fn increment_schema_version(conn: &turso::Connection) -> Result<(), MigrateError> {
     let current = schema_version(conn).await.unwrap_or(0);
     let next = current + 1;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string();
+    let now = epoch_secs().to_string();
 
     conn.execute("DELETE FROM schema_version", ()).await?;
     conn.execute(

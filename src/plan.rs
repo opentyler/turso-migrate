@@ -139,6 +139,14 @@ pub fn generate_plan(
         transactional_stmts.push(build_add_column_stmt(table_name, col));
     }
 
+    for (table_name, col_name) in &diff.columns_to_drop {
+        transactional_stmts.push(format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            quote_ident(table_name),
+            quote_ident(col_name)
+        ));
+    }
+
     for table_name in &diff.tables_to_rebuild {
         if let (Some(desired_table), Some(actual_table)) =
             (desired.get_table(table_name), actual.get_table(table_name))

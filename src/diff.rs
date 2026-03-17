@@ -8,6 +8,7 @@ pub struct SchemaDiff {
     pub tables_to_drop: Vec<String>,
     pub tables_to_rebuild: Vec<String>,
     pub columns_to_add: Vec<(String, ColumnInfo)>,
+    pub columns_to_drop: Vec<(String, String)>,
     pub indexes_to_create: Vec<String>,
     pub indexes_to_drop: Vec<String>,
     pub fts_indexes_to_create: Vec<String>,
@@ -24,6 +25,7 @@ impl SchemaDiff {
             && self.tables_to_drop.is_empty()
             && self.tables_to_rebuild.is_empty()
             && self.columns_to_add.is_empty()
+            && self.columns_to_drop.is_empty()
             && self.indexes_to_create.is_empty()
             && self.indexes_to_drop.is_empty()
             && self.fts_indexes_to_create.is_empty()
@@ -51,6 +53,9 @@ impl fmt::Display for SchemaDiff {
         }
         for (t, col) in &self.columns_to_add {
             writeln!(f, "+ COLUMN {t}.{} {}", col.name, col.col_type)?;
+        }
+        for (t, col) in &self.columns_to_drop {
+            writeln!(f, "- COLUMN {t}.{col}")?;
         }
         for i in &self.indexes_to_create {
             writeln!(f, "+ INDEX {i}")?;
@@ -177,6 +182,61 @@ fn defaults_match(desired: &Option<String>, actual: &Option<String>) -> bool {
     }
 }
 
+fn can_drop_column(
+    col: &ColumnInfo,
+    table: &crate::schema::TableInfo,
+    snapshot: &SchemaSnapshot,
+) -> bool {
+    if col.pk != 0 {
+        return false;
+    }
+    let col_lower = col.name.to_ascii_lowercase();
+    for idx in snapshot.indexes.values() {
+        if idx.table_name.eq_ignore_ascii_case(&table.name)
+            && idx
+                .columns
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&col_lower))
+        {
+            return false;
+        }
+    }
+    for trigger in snapshot.triggers.values() {
+        if trigger.table_name.eq_ignore_ascii_case(&table.name) {
+            return false;
+        }
+    }
+    let table_lower = table.name.to_ascii_lowercase();
+    for view in snapshot.views.values() {
+        let lower_sql = view.sql.to_ascii_lowercase();
+        if lower_sql.contains(&table_lower) {
+            return false;
+        }
+    }
+    for fk in &table.foreign_keys {
+        if fk
+            .from_columns
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&col.name))
+        {
+            return false;
+        }
+    }
+    for other in snapshot.tables.values() {
+        for fk in &other.foreign_keys {
+            if fk.to_table.eq_ignore_ascii_case(&table.name)
+                && fk
+                    .to_columns
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&col.name))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn can_add_column(col: &ColumnInfo) -> bool {
     col.pk == 0 && (!col.notnull || col.default_value.is_some()) && !col.is_generated
 }
@@ -187,6 +247,7 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
         tables_to_drop: Vec::new(),
         tables_to_rebuild: Vec::new(),
         columns_to_add: Vec::new(),
+        columns_to_drop: Vec::new(),
         indexes_to_create: Vec::new(),
         indexes_to_drop: Vec::new(),
         fts_indexes_to_create: Vec::new(),
@@ -215,6 +276,8 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
 
         let mut needs_rebuild = false;
         let mut addable_columns: Vec<ColumnInfo> = Vec::new();
+        let mut droppable_columns: Vec<String> = Vec::new();
+        let mut has_other_changes = false;
 
         for actual_col in &actual_table.columns {
             if actual_col.is_hidden {
@@ -225,8 +288,12 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
                 .iter()
                 .any(|dc| dc.name.eq_ignore_ascii_case(&actual_col.name))
             {
-                needs_rebuild = true;
-                break;
+                if can_drop_column(actual_col, actual_table, actual) {
+                    droppable_columns.push(actual_col.name.clone());
+                } else {
+                    needs_rebuild = true;
+                    break;
+                }
             }
         }
 
@@ -247,23 +314,28 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
                         || actual_col.collation != desired_col.collation
                         || actual_col.is_generated != desired_col.is_generated
                     {
+                        has_other_changes = true;
                         needs_rebuild = true;
                         break;
                     }
                 } else if can_add_column(desired_col) {
                     addable_columns.push(desired_col.clone());
                 } else {
+                    has_other_changes = true;
                     needs_rebuild = true;
                     break;
                 }
             }
         }
 
-        if needs_rebuild {
+        if needs_rebuild || (!droppable_columns.is_empty() && has_other_changes) {
             diff.tables_to_rebuild.push(name.raw().to_string());
         } else {
             for col in addable_columns {
                 diff.columns_to_add.push((name.raw().to_string(), col));
+            }
+            for col in droppable_columns {
+                diff.columns_to_drop.push((name.raw().to_string(), col));
             }
         }
     }

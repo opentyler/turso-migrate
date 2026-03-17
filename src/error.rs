@@ -21,6 +21,12 @@ pub enum MigrateError {
     },
     #[error("schema error: {0}")]
     Schema(String),
+    #[error(
+        "migration busy: another migration is in progress (owner={owner}, expires in {remaining_secs}s)"
+    )]
+    MigrationBusy { owner: String, remaining_secs: u64 },
+    #[error("unsupported feature: {0}")]
+    UnsupportedFeature(String),
     #[error("policy violation: {message}")]
     PolicyViolation {
         message: String,
