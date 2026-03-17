@@ -180,6 +180,7 @@ impl SchemaSnapshot {
         let db = turso::Builder::new_local(":memory:")
             .experimental_index_method(true)
             .experimental_materialized_views(true)
+            .experimental_triggers(true)
             .build()
             .await?;
         let conn = db.connect()?;
@@ -194,6 +195,7 @@ impl SchemaSnapshot {
         let db = turso::Builder::new_local(":memory:")
             .experimental_index_method(true)
             .experimental_materialized_views(true)
+            .experimental_triggers(true)
             .build()
             .await?;
         let conn = db.connect()?;
