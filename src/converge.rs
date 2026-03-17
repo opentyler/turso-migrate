@@ -1,10 +1,12 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::diff::normalize_for_hash;
-use crate::options::{ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport};
+use crate::diff::{compute_diff_with_hints, normalize_for_hash};
+use crate::options::{
+    ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport, DestructiveChangeSet, Failpoint,
+};
 use crate::schema::{Capabilities, SchemaSnapshot};
-use crate::{MigrateError, compute_diff, generate_plan};
+use crate::{MigrateError, generate_plan};
 
 pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), MigrateError> {
     let options = ConvergeOptions {
@@ -26,10 +28,19 @@ pub async fn converge_with_options(
         return Err(MigrateError::Schema("empty schema SQL".into()));
     }
 
+    if is_read_only(conn).await? {
+        return Err(MigrateError::ReadOnly);
+    }
+
     let normalized = normalize_for_hash(schema_sql);
     let schema_hash = blake3::hash(normalized.as_bytes()).to_hex().to_string();
 
-    bootstrap_schema_meta(conn).await?;
+    if let Err(err) = bootstrap_schema_meta(conn).await {
+        if is_read_only(conn).await.unwrap_or(false) || is_read_only_error(&err) {
+            return Err(MigrateError::ReadOnly);
+        }
+        return Err(err);
+    }
 
     let stored_hash = get_meta(conn, "schema_hash").await?;
     let in_progress = get_meta(conn, "migration_in_progress").await?;
@@ -73,17 +84,35 @@ async fn run_slow_path(
     is_crash_recovery: bool,
     start: Instant,
 ) -> Result<ConvergeReport, MigrateError> {
+    check_failpoint(options.failpoint, Failpoint::BeforeIntrospect)?;
     set_meta(conn, "migration_phase", "introspect").await?;
 
     tracing::info!("converge: slow-path, computing diff");
     let desired = SchemaSnapshot::from_schema_sql(schema_sql).await?;
     let actual = SchemaSnapshot::from_connection(conn).await?;
 
-    let diff = compute_diff(&desired, &actual);
+    let diff = compute_diff_with_hints(&desired, &actual, &options.rename_hints);
     let had_ddl = !diff.is_empty();
 
     if had_ddl {
         check_policy(&diff, &options.policy)?;
+
+        let destructive = extract_destructive_changes(&diff);
+
+        if destructive.has_changes()
+            && let Some(target) = &options.backup_before_destructive
+        {
+            write_schema_backup(target, &actual.to_sql())?;
+        }
+
+        if let Some(hook) = &options.pre_destructive_hook {
+            if destructive.has_changes() {
+                hook(&destructive).map_err(|message| MigrateError::PreDestructiveHookRejected {
+                    message,
+                    blocked_operations: destructive.blocked_operations(),
+                })?;
+            }
+        }
 
         let caps = Capabilities::detect(conn).await.unwrap_or_default();
         validate_features(&desired, &caps)?;
@@ -109,6 +138,8 @@ async fn run_slow_path(
                 tables_rebuilt: diff.tables_to_rebuild.len(),
                 tables_dropped: diff.tables_to_drop.len(),
                 columns_added: diff.columns_to_add.len(),
+                columns_dropped: diff.columns_to_drop.len(),
+                columns_renamed: diff.columns_to_rename.len(),
                 indexes_changed: diff.indexes_to_create.len() + diff.fts_indexes_to_create.len(),
                 views_changed: diff.views_to_create.len(),
                 duration: start.elapsed(),
@@ -116,7 +147,12 @@ async fn run_slow_path(
             });
         }
 
+        let prev_schema_sql = actual.to_sql();
+        set_meta(conn, "previous_schema_sql", &prev_schema_sql).await?;
+
         set_meta(conn, "migration_phase", "ddl").await?;
+
+        check_failpoint(options.failpoint, Failpoint::BeforeExecute)?;
 
         tracing::info!(
             transactional = plan.transactional_stmts.len(),
@@ -124,6 +160,8 @@ async fn run_slow_path(
             "converge: executing migration plan"
         );
         crate::execute::execute_plan_with_timeout(conn, &plan, options.busy_timeout).await?;
+
+        check_failpoint(options.failpoint, Failpoint::AfterExecuteBeforeState)?;
 
         set_meta(conn, "migration_phase", "complete").await?;
     }
@@ -146,6 +184,8 @@ async fn run_slow_path(
         tables_rebuilt: diff.tables_to_rebuild.len(),
         tables_dropped: diff.tables_to_drop.len(),
         columns_added: diff.columns_to_add.len(),
+        columns_dropped: diff.columns_to_drop.len(),
+        columns_renamed: diff.columns_to_rename.len(),
         indexes_changed: diff.indexes_to_create.len() + diff.fts_indexes_to_create.len(),
         views_changed: diff.views_to_create.len(),
         duration: start.elapsed(),
@@ -182,6 +222,20 @@ fn check_policy(
                 .columns_to_drop
                 .iter()
                 .map(|(t, c)| format!("DROP COLUMN {t}.{c}"))
+                .collect(),
+        });
+    }
+
+    if !policy.allow_table_rebuilds && !diff.tables_to_rebuild.is_empty() {
+        return Err(MigrateError::PolicyViolation {
+            message: format!(
+                "Would rebuild {} table(s). Set allow_table_rebuilds=true to permit.",
+                diff.tables_to_rebuild.len()
+            ),
+            blocked_operations: diff
+                .tables_to_rebuild
+                .iter()
+                .map(|t| format!("REBUILD TABLE {t}"))
                 .collect(),
         });
     }
@@ -377,6 +431,53 @@ async fn update_state_atomically(
     Ok(())
 }
 
+pub async fn rollback_to_previous(conn: &turso::Connection) -> Result<(), MigrateError> {
+    bootstrap_schema_meta(conn).await?;
+    let prev = get_meta(conn, "previous_schema_sql").await?;
+    match prev {
+        Some(sql) if !sql.trim().is_empty() => converge(conn, &sql).await,
+        _ => Err(MigrateError::Schema(
+            "No previous schema stored. Rollback requires at least one prior migration.".into(),
+        )),
+    }
+}
+
+pub async fn validate_schema(schema_sql: &str) -> Result<(), MigrateError> {
+    if schema_sql.trim().is_empty() {
+        return Err(MigrateError::Schema("empty schema SQL".into()));
+    }
+    SchemaSnapshot::validate(schema_sql)
+        .await
+        .map_err(|e| MigrateError::Schema(format!("Schema validation failed: {e}")))
+}
+
+pub async fn converge_multi(
+    conn: &turso::Connection,
+    schema_parts: &[&str],
+) -> Result<(), MigrateError> {
+    let combined = schema_parts.join("\n");
+    converge(conn, &combined).await
+}
+
+pub async fn converge_multi_with_options(
+    conn: &turso::Connection,
+    schema_parts: &[&str],
+    options: &ConvergeOptions,
+) -> Result<ConvergeReport, MigrateError> {
+    let combined = schema_parts.join("\n");
+    converge_with_options(conn, &combined, options).await
+}
+
+pub async fn is_read_only(conn: &turso::Connection) -> Result<bool, MigrateError> {
+    let mut rows = conn.query("PRAGMA query_only", ()).await?;
+    if let Some(row) = rows.next().await? {
+        let value: i64 = row.get(0).unwrap_or(0);
+        Ok(value != 0)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn converge_from_path(
     conn: &turso::Connection,
     path: impl AsRef<Path>,
@@ -403,6 +504,12 @@ pub async fn schema_version(conn: &turso::Connection) -> Result<u32, MigrateErro
 }
 
 async fn increment_schema_version(conn: &turso::Connection) -> Result<(), MigrateError> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL)",
+        (),
+    )
+    .await?;
+
     let current = schema_version(conn).await.unwrap_or(0);
     let next = current + 1;
     let now = epoch_secs().to_string();
@@ -452,4 +559,59 @@ async fn delete_meta(conn: &turso::Connection, key: &str) -> Result<(), MigrateE
     conn.execute("DELETE FROM _schema_meta WHERE key = ?1", [key])
         .await?;
     Ok(())
+}
+
+fn extract_destructive_changes(diff: &crate::diff::SchemaDiff) -> DestructiveChangeSet {
+    DestructiveChangeSet {
+        tables_to_drop: diff.tables_to_drop.clone(),
+        columns_to_drop: diff.columns_to_drop.clone(),
+        tables_to_rebuild: diff.tables_to_rebuild.clone(),
+    }
+}
+
+fn check_failpoint(configured: Option<Failpoint>, target: Failpoint) -> Result<(), MigrateError> {
+    if configured == Some(target) {
+        return Err(MigrateError::InjectedFailure {
+            failpoint: target.as_str().to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn is_read_only_error(err: &MigrateError) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("readonly")
+        || lower.contains("read-only")
+        || lower.contains("attempt to write a readonly database")
+}
+
+fn write_schema_backup(path_hint: &Path, schema_sql: &str) -> Result<(), MigrateError> {
+    let meta = std::fs::metadata(path_hint);
+    let treat_as_dir = meta
+        .as_ref()
+        .map(|m| m.is_dir())
+        .unwrap_or_else(|_| path_hint.extension().is_none());
+
+    let output_path = if treat_as_dir {
+        std::fs::create_dir_all(path_hint).map_err(|source| MigrateError::Io {
+            path: path_hint.to_path_buf(),
+            source,
+        })?;
+        path_hint.join(format!("turso_migrate_backup_{}.sql", epoch_secs()))
+    } else {
+        if let Some(parent) = path_hint.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|source| MigrateError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        path_hint.to_path_buf()
+    };
+
+    std::fs::write(&output_path, schema_sql).map_err(|source| MigrateError::Io {
+        path: output_path,
+        source,
+    })
 }

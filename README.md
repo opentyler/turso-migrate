@@ -135,7 +135,11 @@ let options = ConvergeOptions {
     policy: ConvergePolicy::default(),      // Safe: blocks destructive changes
     dry_run: false,                         // Set true to preview without executing
     busy_timeout: Duration::from_secs(5),   // PRAGMA busy_timeout for SQLITE_BUSY
-    max_retries: 3,                         // Reserved for future retry logic
+    max_retries: 3,
+    backup_before_destructive: None,        // Optional file/dir path for pre-DDL SQL backup
+    rename_hints: vec![],                   // Optional explicit column rename hints
+    pre_destructive_hook: None,             // Optional callback gate before destructive changes
+    failpoint: None,                        // Test-only crash injection selector
 };
 ```
 
@@ -152,6 +156,8 @@ pub struct ConvergeReport {
     pub tables_rebuilt: usize,
     pub tables_dropped: usize,
     pub columns_added: usize,
+    pub columns_dropped: usize,
+    pub columns_renamed: usize,
     pub indexes_changed: usize,
     pub views_changed: usize,
     pub duration: Duration,
@@ -165,6 +171,44 @@ Reads a schema file from disk, then converges using the permissive policy.
 
 ```rust
 turso_migrate::converge_from_path(&conn, "schemas/turso_schema.sql").await?;
+```
+
+### `converge_multi(conn, &[...])` and `converge_multi_with_options(...)`
+
+Compose schema from multiple SQL fragments/files (concatenated in order), then converge as one schema:
+
+```rust
+let parts = [
+    include_str!("schemas/core.sql"),
+    include_str!("schemas/indexes.sql"),
+    include_str!("schemas/views.sql"),
+];
+
+turso_migrate::converge_multi(&conn, &parts).await?;
+```
+
+### `rollback_to_previous(conn)`
+
+Re-converges to the previous stored schema snapshot (`previous_schema_sql` in `_schema_meta`):
+
+```rust
+turso_migrate::rollback_to_previous(&conn).await?;
+```
+
+### `validate_schema(schema_sql)`
+
+Validates schema SQL by executing it against an in-memory Turso database:
+
+```rust
+turso_migrate::validate_schema(include_str!("../turso_schema.sql")).await?;
+```
+
+### `ConnectionLike` wrappers
+
+For codebases that wrap `turso::Connection`, use:
+
+```rust
+use turso_migrate::{ConnectionLike, converge_like, schema_version_like};
 ```
 
 ### `SchemaDiff` — Human-Readable Diff
@@ -218,6 +262,9 @@ All operations return `Result<_, MigrateError>`:
 | `PolicyViolation { message, blocked_operations }` | Policy blocked a destructive change | What was blocked and why |
 | `MigrationBusy { owner, remaining_secs }` | Another migration holds the lease | Owner ID and seconds until expiry |
 | `UnsupportedFeature(String)` | Schema uses FTS/vector/materialized views but target lacks support | Descriptive message |
+| `ReadOnly` | Connection is read-only / replica role | Migration requires write access |
+| `PreDestructiveHookRejected { .. }` | User hook rejected destructive operations | Hook message + blocked ops |
+| `InjectedFailure { failpoint }` | Test failpoint intentionally aborted convergence | Failpoint identifier |
 
 ## How It Works
 
@@ -299,8 +346,18 @@ Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT c
 | Migration lease (concurrency) | ✅ (cooperative lease in _schema_meta) |
 | Destructive change protection | ✅ (ConvergePolicy) |
 | Dry-run mode | ✅ (plan without executing) |
+| Runtime schema validation API | ✅ (`validate_schema`) |
 | Crash recovery | ✅ (`migration_in_progress` flag) |
 | Schema drift detection | ✅ (PRAGMA schema_version) |
+| Column rename detection | ✅ (conservative heuristic + `ColumnRenameHint`) |
+| Rollback to previous schema | ✅ (`rollback_to_previous`) |
+| Multi-file schema composition | ✅ (`converge_multi*`) |
+| Read-only/replica guard | ✅ (`ReadOnly` + `is_read_only`) |
+| Pre-destructive backup snapshot | ✅ (`backup_before_destructive`) |
+| Pre-destructive callback gate | ✅ (`pre_destructive_hook`) |
+| Crash failpoint scaffolding | ✅ (`Failpoint` in `ConvergeOptions`) |
+| Connection abstraction wrappers | ✅ (`ConnectionLike` + `*_like` helpers) |
+| CLI workflows | ✅ (`turso-migrate diff/plan/check/apply/validate`) |
 | Case-insensitive identifiers | ✅ (CIString keys) |
 | String-literal-aware SQL normalization | ✅ (preserves case in literals) |
 | Human-readable diff output | ✅ (Display for SchemaDiff) |
@@ -369,7 +426,7 @@ This means:
 
 ### Fundamental
 
-**No column rename detection.** Renaming `name` to `display_name` is seen as "drop + add" — data in the old column is lost during rebuild. *Workaround:* Run `ALTER TABLE ... RENAME COLUMN` manually before `converge()`.
+**Rename detection is conservative.** Automatic rename detection only applies when there is an unambiguous 1:1 match (same type/constraints/position). Use `ColumnRenameHint` for non-positional or ambiguous rename scenarios.
 
 **No data migrations.** Schema (DDL) only. Data transforms must be done separately.
 
@@ -393,7 +450,19 @@ This means:
 cargo test
 ```
 
-78 tests covering: convergence, diff (12 categories + edge cases), plan generation, execution (3 phases), introspection (table_xinfo, FK, UNIQUE, COLLATE), schema round-trip, policy enforcement, dry-run, drift detection, crash recovery, SQL normalization, and the legacy bridge. In-memory Turso databases, no external services.
+95 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
+
+## CLI
+
+The crate now ships a small CLI for development/CI workflows:
+
+```bash
+turso-migrate validate schemas/turso_schema.sql
+turso-migrate diff data/user.db schemas/turso_schema.sql
+turso-migrate plan data/user.db schemas/turso_schema.sql
+turso-migrate check data/user.db schemas/turso_schema.sql
+turso-migrate apply data/user.db schemas/turso_schema.sql
+```
 
 ## Background
 

@@ -1,7 +1,8 @@
+use tempfile::tempdir;
 use turso_migrate::diff::normalize_for_hash;
 use turso_migrate::{
-    ConvergeMode, ConvergeOptions, ConvergePolicy, SchemaSnapshot, converge, converge_with_options,
-    schema_version,
+    ConvergeMode, ConvergeOptions, ConvergePolicy, Failpoint, MigrateError, SchemaSnapshot,
+    converge, converge_with_options, rollback_to_previous, schema_version,
 };
 
 fn test_schema() -> &'static str {
@@ -311,4 +312,147 @@ async fn drift_detection_forces_slow_path() {
         !snap.has_table("drift_table"),
         "Drift table should be dropped by convergence"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_to_previous_restores_prior_schema() {
+    let (_db, conn) = empty_db().await;
+
+    let schema_v1 = "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT NOT NULL);";
+    let schema_v2 = "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT);";
+
+    converge(&conn, schema_v1).await.unwrap();
+    converge(&conn, schema_v2).await.unwrap();
+
+    rollback_to_previous(&conn).await.unwrap();
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let foo = snap.get_table("foo").unwrap();
+    assert!(foo.columns.iter().any(|c| c.name == "name"));
+    assert!(!foo.columns.iter().any(|c| c.name == "email"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_without_snapshot_errors() {
+    let (_db, conn) = empty_db().await;
+    let err = rollback_to_previous(&conn).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("No previous schema stored"), "Got: {msg}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_destructive_hook_can_block_migration() {
+    let (_db, conn) = empty_db().await;
+    converge(&conn, test_schema()).await.unwrap();
+
+    conn.execute("CREATE TABLE extra_table (id TEXT PRIMARY KEY)", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('schema_hash', 'force')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        pre_destructive_hook: Some(std::sync::Arc::new(|changes| {
+            if !changes.tables_to_drop.is_empty() {
+                Err("table drops blocked by hook".to_string())
+            } else {
+                Ok(())
+            }
+        })),
+        ..Default::default()
+    };
+
+    let err = converge_with_options(&conn, test_schema(), &options)
+        .await
+        .unwrap_err();
+    match err {
+        MigrateError::PreDestructiveHookRejected {
+            message,
+            blocked_operations,
+        } => {
+            assert!(message.contains("blocked"));
+            assert!(
+                blocked_operations
+                    .iter()
+                    .any(|op| op.contains("DROP TABLE"))
+            );
+        }
+        other => panic!("expected hook rejection, got: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_only_mode_returns_read_only_error() {
+    let (_db, conn) = empty_db().await;
+    conn.execute("PRAGMA query_only = 1", ()).await.unwrap();
+
+    let err = converge(&conn, test_schema()).await.unwrap_err();
+    assert!(matches!(err, MigrateError::ReadOnly));
+
+    conn.execute("PRAGMA query_only = 0", ()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failpoint_injection_aborts_then_recovery_succeeds() {
+    let (_db, conn) = empty_db().await;
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        failpoint: Some(Failpoint::BeforeExecute),
+        ..Default::default()
+    };
+
+    let err = converge_with_options(&conn, test_schema(), &options)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MigrateError::InjectedFailure { failpoint } if failpoint == "before_execute"
+    ));
+
+    converge(&conn, test_schema()).await.unwrap();
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert_eq!(snap.tables.len(), 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_before_destructive_writes_snapshot_file() {
+    let (_db, conn) = empty_db().await;
+    converge(&conn, test_schema()).await.unwrap();
+
+    conn.execute("CREATE TABLE extra_table (id TEXT PRIMARY KEY)", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('schema_hash', 'force')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let dir = tempdir().unwrap();
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        backup_before_destructive: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    converge_with_options(&conn, test_schema(), &options)
+        .await
+        .unwrap();
+
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "expected one backup file");
+
+    let backup_sql = std::fs::read_to_string(&entries[0]).unwrap();
+    assert!(backup_sql.contains("CREATE TABLE"));
+    assert!(backup_sql.contains("extra_table"));
 }

@@ -34,8 +34,12 @@ pub fn generate_plan(
         .map(|s| s.to_ascii_lowercase())
         .collect();
 
-    let altered_tables: BTreeSet<String> =
-        diff.columns_to_add.iter().map(|(t, _)| t.clone()).collect();
+    let altered_tables: BTreeSet<String> = diff
+        .columns_to_add
+        .iter()
+        .map(|(t, _)| t.clone())
+        .chain(diff.columns_to_rename.iter().map(|(t, _, _)| t.clone()))
+        .collect();
 
     let mut views_to_drop: BTreeSet<String> = diff.views_to_drop.iter().cloned().collect();
     let mut views_to_create: BTreeSet<String> = diff.views_to_create.iter().cloned().collect();
@@ -133,6 +137,15 @@ pub fn generate_plan(
         if let Some(table) = desired.get_table(table_name) {
             transactional_stmts.push(table.sql.clone());
         }
+    }
+
+    for (table_name, old_col, new_col) in &diff.columns_to_rename {
+        transactional_stmts.push(format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            quote_ident(table_name),
+            quote_ident(old_col),
+            quote_ident(new_col)
+        ));
     }
 
     for (table_name, col) in &diff.columns_to_add {

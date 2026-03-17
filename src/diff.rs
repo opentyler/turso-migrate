@@ -1,6 +1,7 @@
 use std::fmt;
 
-use crate::schema::{ColumnInfo, SchemaSnapshot};
+use crate::options::ColumnRenameHint;
+use crate::schema::{ColumnInfo, SchemaSnapshot, TableInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDiff {
@@ -9,6 +10,7 @@ pub struct SchemaDiff {
     pub tables_to_rebuild: Vec<String>,
     pub columns_to_add: Vec<(String, ColumnInfo)>,
     pub columns_to_drop: Vec<(String, String)>,
+    pub columns_to_rename: Vec<(String, String, String)>,
     pub indexes_to_create: Vec<String>,
     pub indexes_to_drop: Vec<String>,
     pub fts_indexes_to_create: Vec<String>,
@@ -26,6 +28,7 @@ impl SchemaDiff {
             && self.tables_to_rebuild.is_empty()
             && self.columns_to_add.is_empty()
             && self.columns_to_drop.is_empty()
+            && self.columns_to_rename.is_empty()
             && self.indexes_to_create.is_empty()
             && self.indexes_to_drop.is_empty()
             && self.fts_indexes_to_create.is_empty()
@@ -56,6 +59,9 @@ impl fmt::Display for SchemaDiff {
         }
         for (t, col) in &self.columns_to_drop {
             writeln!(f, "- COLUMN {t}.{col}")?;
+        }
+        for (t, old, new) in &self.columns_to_rename {
+            writeln!(f, "~ COLUMN {t}.{old} -> {new}")?;
         }
         for i in &self.indexes_to_create {
             writeln!(f, "+ INDEX {i}")?;
@@ -242,12 +248,21 @@ fn can_add_column(col: &ColumnInfo) -> bool {
 }
 
 pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> SchemaDiff {
+    compute_diff_with_hints(desired, actual, &[])
+}
+
+pub fn compute_diff_with_hints(
+    desired: &SchemaSnapshot,
+    actual: &SchemaSnapshot,
+    rename_hints: &[ColumnRenameHint],
+) -> SchemaDiff {
     let mut diff = SchemaDiff {
         tables_to_create: Vec::new(),
         tables_to_drop: Vec::new(),
         tables_to_rebuild: Vec::new(),
         columns_to_add: Vec::new(),
         columns_to_drop: Vec::new(),
+        columns_to_rename: Vec::new(),
         indexes_to_create: Vec::new(),
         indexes_to_drop: Vec::new(),
         fts_indexes_to_create: Vec::new(),
@@ -277,7 +292,9 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
         let mut needs_rebuild = false;
         let mut addable_columns: Vec<ColumnInfo> = Vec::new();
         let mut droppable_columns: Vec<String> = Vec::new();
-        let mut has_other_changes = false;
+        let mut missing_actual: Vec<ColumnInfo> = Vec::new();
+        let mut missing_desired: Vec<ColumnInfo> = Vec::new();
+        let mut renamed_columns: Vec<(String, String)> = Vec::new();
 
         for actual_col in &actual_table.columns {
             if actual_col.is_hidden {
@@ -288,12 +305,7 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
                 .iter()
                 .any(|dc| dc.name.eq_ignore_ascii_case(&actual_col.name))
             {
-                if can_drop_column(actual_col, actual_table, actual) {
-                    droppable_columns.push(actual_col.name.clone());
-                } else {
-                    needs_rebuild = true;
-                    break;
-                }
+                missing_actual.push(actual_col.clone());
             }
         }
 
@@ -314,21 +326,54 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
                         || actual_col.collation != desired_col.collation
                         || actual_col.is_generated != desired_col.is_generated
                     {
-                        has_other_changes = true;
                         needs_rebuild = true;
                         break;
                     }
-                } else if can_add_column(desired_col) {
-                    addable_columns.push(desired_col.clone());
                 } else {
-                    has_other_changes = true;
-                    needs_rebuild = true;
-                    break;
+                    missing_desired.push(desired_col.clone());
                 }
             }
         }
 
-        if needs_rebuild || (!droppable_columns.is_empty() && has_other_changes) {
+        if !needs_rebuild {
+            let missing_actual_names: Vec<String> =
+                missing_actual.iter().map(|c| c.name.clone()).collect();
+            let (detected_renames, remaining_add, remaining_drop) = detect_column_renames(
+                name.raw(),
+                desired_table,
+                actual_table,
+                missing_desired,
+                missing_actual_names,
+                rename_hints,
+            );
+            renamed_columns = detected_renames;
+            addable_columns = remaining_add;
+
+            for col_name in remaining_drop {
+                if let Some(col) = missing_actual
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(&col_name))
+                {
+                    if can_drop_column(col, actual_table, actual) {
+                        droppable_columns.push(col_name);
+                    } else {
+                        needs_rebuild = true;
+                        break;
+                    }
+                }
+            }
+
+            if !needs_rebuild {
+                for col in &addable_columns {
+                    if !can_add_column(col) {
+                        needs_rebuild = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if needs_rebuild {
             diff.tables_to_rebuild.push(name.raw().to_string());
         } else {
             for col in addable_columns {
@@ -336,6 +381,10 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
             }
             for col in droppable_columns {
                 diff.columns_to_drop.push((name.raw().to_string(), col));
+            }
+            for (from, to) in renamed_columns {
+                diff.columns_to_rename
+                    .push((name.raw().to_string(), from, to));
             }
         }
     }
@@ -410,4 +459,153 @@ pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> Schema
     }
 
     diff
+}
+
+fn detect_column_renames(
+    table_name: &str,
+    desired_table: &TableInfo,
+    actual_table: &TableInfo,
+    addable_columns: Vec<ColumnInfo>,
+    droppable_columns: Vec<String>,
+    rename_hints: &[ColumnRenameHint],
+) -> (Vec<(String, String)>, Vec<ColumnInfo>, Vec<String>) {
+    let mut remaining_add = addable_columns;
+    let mut remaining_drop = droppable_columns;
+    let mut renamed = Vec::new();
+
+    let mut hinted_pairs = Vec::new();
+    for hint in rename_hints {
+        if !hint.table.eq_ignore_ascii_case(table_name) {
+            continue;
+        }
+        let drop_idx = remaining_drop
+            .iter()
+            .position(|old| old.eq_ignore_ascii_case(&hint.from));
+        let add_idx = remaining_add
+            .iter()
+            .position(|new_col| new_col.name.eq_ignore_ascii_case(&hint.to));
+
+        if let (Some(di), Some(ai)) = (drop_idx, add_idx) {
+            let old_name = remaining_drop[di].clone();
+            let new_name = remaining_add[ai].name.clone();
+            let old_col = actual_table
+                .columns
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(&old_name));
+            let new_col = desired_table
+                .columns
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(&new_name));
+
+            if let (Some(old_col), Some(new_col)) = (old_col, new_col)
+                && columns_compatible_for_rename(old_col, new_col)
+            {
+                hinted_pairs.push((di, ai, old_name, new_name));
+            }
+        }
+    }
+
+    hinted_pairs.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut remove_add = Vec::new();
+    for (drop_idx, add_idx, old_name, new_name) in hinted_pairs {
+        renamed.push((old_name, new_name));
+        remaining_drop.remove(drop_idx);
+        remove_add.push(add_idx);
+    }
+    remove_add.sort_unstable();
+    remove_add.dedup();
+    for idx in remove_add.into_iter().rev() {
+        remaining_add.remove(idx);
+    }
+
+    if remaining_add.is_empty() || remaining_drop.is_empty() {
+        return (renamed, remaining_add, remaining_drop);
+    }
+
+    let mut candidates: Vec<Vec<usize>> = Vec::new();
+    for old_name in &remaining_drop {
+        let Some(old_col) = actual_table
+            .columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(old_name))
+        else {
+            candidates.push(Vec::new());
+            continue;
+        };
+
+        let old_pos = column_position(actual_table, &old_col.name);
+        let mut matches = Vec::new();
+        for (idx, new_col) in remaining_add.iter().enumerate() {
+            if !columns_compatible_for_rename(old_col, new_col) {
+                continue;
+            }
+            if column_position(desired_table, &new_col.name) == old_pos {
+                matches.push(idx);
+            }
+        }
+        candidates.push(matches);
+    }
+
+    let mut add_usage = vec![0usize; remaining_add.len()];
+    for cand in &candidates {
+        if cand.len() == 1 {
+            add_usage[cand[0]] += 1;
+        }
+    }
+
+    let mut drop_remove = Vec::new();
+    let mut add_remove = Vec::new();
+
+    for (drop_idx, cand) in candidates.iter().enumerate() {
+        if cand.len() == 1 {
+            let add_idx = cand[0];
+            if add_usage[add_idx] == 1 {
+                let old_name = remaining_drop[drop_idx].clone();
+                let new_name = remaining_add[add_idx].name.clone();
+                renamed.push((old_name, new_name));
+                drop_remove.push(drop_idx);
+                add_remove.push(add_idx);
+            }
+        }
+    }
+
+    drop_remove.sort_unstable();
+    drop_remove.dedup();
+    for idx in drop_remove.into_iter().rev() {
+        remaining_drop.remove(idx);
+    }
+
+    add_remove.sort_unstable();
+    add_remove.dedup();
+    for idx in add_remove.into_iter().rev() {
+        remaining_add.remove(idx);
+    }
+
+    (renamed, remaining_add, remaining_drop)
+}
+
+fn columns_compatible_for_rename(old_col: &ColumnInfo, new_col: &ColumnInfo) -> bool {
+    !old_col.is_generated
+        && !old_col.is_hidden
+        && !new_col.is_generated
+        && !new_col.is_hidden
+        && types_match(&old_col.col_type, &new_col.col_type)
+        && old_col.notnull == new_col.notnull
+        && old_col.pk == new_col.pk
+        && old_col.collation == new_col.collation
+        && defaults_match(&old_col.default_value, &new_col.default_value)
+}
+
+fn column_position(table: &TableInfo, name: &str) -> Option<usize> {
+    let mut pos = 0usize;
+    for col in &table.columns {
+        if col.is_hidden {
+            continue;
+        }
+        if col.name.eq_ignore_ascii_case(name) {
+            return Some(pos);
+        }
+        pos += 1;
+    }
+    None
 }

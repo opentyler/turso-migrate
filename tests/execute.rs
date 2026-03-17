@@ -88,6 +88,45 @@ async fn add_column_execution() {
 }
 
 #[tokio::test]
+async fn rename_column_execution_preserves_data() {
+    let (_db, conn) = empty_db().await;
+    conn.execute(
+        "CREATE TABLE foo (id TEXT PRIMARY KEY, legacy_name TEXT NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("INSERT INTO foo VALUES ('1', 'alice')", ())
+        .await
+        .unwrap();
+
+    let desired_sql = "CREATE TABLE foo (id TEXT PRIMARY KEY, display_name TEXT NOT NULL);";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert_eq!(
+        diff.columns_to_rename,
+        vec![(
+            "foo".to_string(),
+            "legacy_name".to_string(),
+            "display_name".to_string()
+        )],
+        "Expected rename diff, got: {diff:?}"
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let mut rows = conn
+        .query("SELECT id, display_name FROM foo ORDER BY id", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "1");
+    assert_eq!(row.get::<String>(1).unwrap(), "alice");
+}
+
+#[tokio::test]
 async fn table_rebuild_preserves_data() {
     let (_db, conn) = empty_db().await;
     conn.execute(

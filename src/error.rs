@@ -21,12 +21,21 @@ pub enum MigrateError {
     },
     #[error("schema error: {0}")]
     Schema(String),
+    #[error("database is read-only: migrations require write access")]
+    ReadOnly,
     #[error(
         "migration busy: another migration is in progress (owner={owner}, expires in {remaining_secs}s)"
     )]
     MigrationBusy { owner: String, remaining_secs: u64 },
+    #[error("pre-destructive hook rejected migration: {message}")]
+    PreDestructiveHookRejected {
+        message: String,
+        blocked_operations: Vec<String>,
+    },
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),
+    #[error("injected failpoint triggered: {failpoint}")]
+    InjectedFailure { failpoint: String },
     #[error("policy violation: {message}")]
     PolicyViolation {
         message: String,

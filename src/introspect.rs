@@ -1,5 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::diff::normalize_for_hash;
 use crate::schema::{
     CIString, Capabilities, ColumnInfo, ForeignKey, IndexInfo, SchemaSnapshot, TableInfo,
     TriggerInfo, ViewInfo,
@@ -23,13 +25,27 @@ impl SchemaSnapshot {
             )
             .await?;
 
+        let mut table_defs = Vec::new();
+
         while let Some(row) = table_rows.next().await? {
             let name: String = row.get(0)?;
             if is_internal_object(&name) {
                 continue;
             }
             let sql: String = row.get(1)?;
-            let mut columns = table_columns_xinfo(conn, &name).await?;
+
+            table_defs.push((name, sql));
+        }
+
+        let mut batched_columns = table_columns_xinfo_batched(conn).await.unwrap_or_default();
+
+        for (name, sql) in table_defs {
+            let mut columns = if let Some(cols) = batched_columns.remove(&name.to_ascii_lowercase())
+            {
+                cols
+            } else {
+                table_columns_xinfo(conn, &name).await?
+            };
             let mut foreign_keys = table_foreign_keys(conn, &name).await.unwrap_or_default();
             if foreign_keys.is_empty() {
                 foreign_keys = parse_fk_references_from_sql(&sql);
@@ -154,6 +170,13 @@ impl SchemaSnapshot {
     }
 
     pub async fn from_schema_sql(schema_sql: &str) -> Result<Self, turso::Error> {
+        let normalized = normalize_for_hash(schema_sql);
+        let hash = blake3::hash(normalized.as_bytes()).to_hex().to_string();
+
+        if let Some(cached) = snapshot_cache_get(&hash) {
+            return Ok(cached);
+        }
+
         let db = turso::Builder::new_local(":memory:")
             .experimental_index_method(true)
             .experimental_materialized_views(true)
@@ -161,7 +184,35 @@ impl SchemaSnapshot {
             .await?;
         let conn = db.connect()?;
         conn.execute_batch(schema_sql).await?;
-        Self::from_connection(&conn).await
+        let snapshot = Self::from_connection(&conn).await?;
+
+        snapshot_cache_put(hash, snapshot.clone());
+        Ok(snapshot)
+    }
+
+    pub async fn validate(schema_sql: &str) -> Result<(), turso::Error> {
+        let db = turso::Builder::new_local(":memory:")
+            .experimental_index_method(true)
+            .experimental_materialized_views(true)
+            .build()
+            .await?;
+        let conn = db.connect()?;
+        conn.execute_batch(schema_sql).await?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn snapshot_cache_len_for_tests() -> usize {
+        let cache = SNAPSHOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        cache.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    #[doc(hidden)]
+    pub fn clear_snapshot_cache_for_tests() {
+        let cache = SNAPSHOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut map) = cache.lock() {
+            map.clear();
+        }
     }
 
     pub fn to_sql(&self) -> String {
@@ -318,6 +369,53 @@ async fn table_columns_xinfo(
         }
         Err(_) => table_columns_fallback(conn, table_name).await,
     }
+}
+
+async fn table_columns_xinfo_batched(
+    conn: &turso::Connection,
+) -> Result<HashMap<String, Vec<ColumnInfo>>, turso::Error> {
+    let mut rows = conn
+        .query(
+            "SELECT m.name, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk, p.hidden \
+             FROM sqlite_schema m \
+             JOIN pragma_table_xinfo(m.name) p \
+             WHERE m.type = 'table' \
+               AND m.name NOT LIKE 'sqlite_%' \
+               AND m.name NOT IN ('_schema_meta', '_turso_migrations') \
+               AND m.name NOT LIKE '_converge_new_%' \
+             ORDER BY m.name, p.cid",
+            (),
+        )
+        .await?;
+
+    let mut out: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
+    while let Some(row) = rows.next().await? {
+        let table_name: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let col_type: String = row.get(2)?;
+        let notnull: i64 = row.get(3)?;
+        let default_value: Option<String> = row.get(4)?;
+        let pk: i64 = row.get(5)?;
+        let hidden: i64 = row.get(6).unwrap_or(0);
+
+        let is_generated = hidden == 2 || hidden == 3;
+        let is_hidden = hidden == 1;
+
+        out.entry(table_name.to_ascii_lowercase())
+            .or_default()
+            .push(ColumnInfo {
+                name,
+                col_type,
+                notnull: notnull != 0,
+                default_value,
+                pk,
+                collation: None,
+                is_generated,
+                is_hidden,
+            });
+    }
+
+    Ok(out)
 }
 
 async fn table_columns_fallback(
@@ -525,4 +623,22 @@ fn find_column_section(lower_sql: &str, col_pattern: &str) -> Option<String> {
     let after = &lower_sql[pos..];
     let end = after.find(',').or_else(|| after.find(')'))?;
     Some(after[..end].to_string())
+}
+
+static SNAPSHOT_CACHE: OnceLock<Mutex<HashMap<String, Arc<SchemaSnapshot>>>> = OnceLock::new();
+
+fn snapshot_cache_get(hash: &str) -> Option<SchemaSnapshot> {
+    let cache = SNAPSHOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let map = cache.lock().ok()?;
+    map.get(hash).map(|arc| (**arc).clone())
+}
+
+fn snapshot_cache_put(hash: String, snapshot: SchemaSnapshot) {
+    let cache = SNAPSHOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = cache.lock() {
+        if map.len() > 16 {
+            map.clear();
+        }
+        map.insert(hash, Arc::new(snapshot));
+    }
 }

@@ -168,3 +168,26 @@ async fn snapshot_detects_table_properties() {
     assert!(!docs.is_without_rowid, "documents is not WITHOUT ROWID");
     assert!(!docs.has_autoincrement, "documents has no AUTOINCREMENT");
 }
+
+#[tokio::test]
+async fn snapshot_cache_reuses_normalized_schema_hash() {
+    SchemaSnapshot::clear_snapshot_cache_for_tests();
+    assert_eq!(SchemaSnapshot::snapshot_cache_len_for_tests(), 0);
+
+    let formatted = format!("\n\n{}\n", test_schema());
+    let commented = format!(
+        "-- same schema with comment\n{}\n-- trailing",
+        test_schema()
+    );
+
+    let _ = SchemaSnapshot::from_schema_sql(&formatted).await.unwrap();
+    let len1 = SchemaSnapshot::snapshot_cache_len_for_tests();
+    assert_eq!(len1, 1, "first schema load should fill cache");
+
+    let _ = SchemaSnapshot::from_schema_sql(&commented).await.unwrap();
+    let len2 = SchemaSnapshot::snapshot_cache_len_for_tests();
+    assert_eq!(
+        len2, 1,
+        "format/comment-only variants should reuse the same cache entry"
+    );
+}

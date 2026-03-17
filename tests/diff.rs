@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
-use turso_migrate::diff::compute_diff;
-use turso_migrate::{CIString, ColumnInfo, IndexInfo, SchemaSnapshot, TableInfo, ViewInfo};
+use turso_migrate::diff::{compute_diff, compute_diff_with_hints};
+use turso_migrate::{
+    CIString, ColumnInfo, ColumnRenameHint, IndexInfo, SchemaSnapshot, TableInfo, ViewInfo,
+};
 
 fn test_schema() -> &'static str {
     include_str!("fixtures/schema.sql")
@@ -275,6 +277,105 @@ fn changed_column_type_triggers_rebuild() {
 
     let diff = compute_diff(&desired, &actual);
     assert_eq!(diff.tables_to_rebuild, vec!["foo".to_string()]);
+}
+
+#[test]
+fn column_rename_is_detected_conservatively() {
+    let mut desired = empty_snapshot();
+    let mut actual = empty_snapshot();
+
+    actual.tables.insert(
+        ci("foo"),
+        make_table(
+            "foo",
+            vec![
+                make_column("id", "TEXT", true, None, 1),
+                make_column("legacy_name", "TEXT", false, None, 0),
+            ],
+        ),
+    );
+    desired.tables.insert(
+        ci("foo"),
+        make_table(
+            "foo",
+            vec![
+                make_column("id", "TEXT", true, None, 1),
+                make_column("display_name", "TEXT", false, None, 0),
+            ],
+        ),
+    );
+
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        diff.tables_to_rebuild.is_empty(),
+        "rename should not rebuild"
+    );
+    assert!(diff.columns_to_add.is_empty(), "rename should not add");
+    assert!(diff.columns_to_drop.is_empty(), "rename should not drop");
+    assert_eq!(
+        diff.columns_to_rename,
+        vec![(
+            "foo".to_string(),
+            "legacy_name".to_string(),
+            "display_name".to_string()
+        )]
+    );
+}
+
+#[test]
+fn rename_hint_enables_non_positional_rename() {
+    let mut desired = empty_snapshot();
+    let mut actual = empty_snapshot();
+
+    actual.tables.insert(
+        ci("foo"),
+        make_table(
+            "foo",
+            vec![
+                make_column("id", "TEXT", true, None, 1),
+                make_column("legacy_name", "TEXT", false, None, 0),
+                make_column("keep", "TEXT", false, None, 0),
+            ],
+        ),
+    );
+    desired.tables.insert(
+        ci("foo"),
+        make_table(
+            "foo",
+            vec![
+                make_column("id", "TEXT", true, None, 1),
+                make_column("keep", "TEXT", false, None, 0),
+                make_column("display_name", "TEXT", false, None, 0),
+            ],
+        ),
+    );
+
+    let baseline = compute_diff(&desired, &actual);
+    assert!(
+        baseline.columns_to_rename.is_empty(),
+        "position mismatch blocks heuristic rename"
+    );
+
+    let hinted = compute_diff_with_hints(
+        &desired,
+        &actual,
+        &[ColumnRenameHint {
+            table: "foo".to_string(),
+            from: "legacy_name".to_string(),
+            to: "display_name".to_string(),
+        }],
+    );
+
+    assert_eq!(
+        hinted.columns_to_rename,
+        vec![(
+            "foo".to_string(),
+            "legacy_name".to_string(),
+            "display_name".to_string()
+        )]
+    );
+    assert!(hinted.columns_to_add.is_empty());
+    assert!(hinted.columns_to_drop.is_empty());
 }
 
 #[test]
