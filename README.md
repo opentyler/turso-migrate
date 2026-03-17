@@ -125,6 +125,22 @@ let policy = ConvergePolicy {
 
 When a policy violation is detected, `converge_with_options` returns `Err(MigrateError::PolicyViolation { .. })` with details about what was blocked and why.
 
+### `ConvergeOptions` — Full Configuration
+
+```rust
+use std::time::Duration;
+use turso_migrate::ConvergeOptions;
+
+let options = ConvergeOptions {
+    policy: ConvergePolicy::default(),      // Safe: blocks destructive changes
+    dry_run: false,                         // Set true to preview without executing
+    busy_timeout: Duration::from_secs(5),   // PRAGMA busy_timeout for SQLITE_BUSY
+    max_retries: 3,                         // Reserved for future retry logic
+};
+```
+
+The `busy_timeout` is applied as `PRAGMA busy_timeout` before executing the migration plan. This prevents `SQLITE_BUSY` errors when another connection holds a write lock.
+
 ### `ConvergeReport` — What Happened
 
 Returned by `converge_with_options`. Includes the execution mode, statistics about what changed, and timing.
@@ -188,6 +204,19 @@ Returns the schema version counter (incremented atomically each time DDL is appl
 let version = turso_migrate::schema_version(&conn).await?;
 ```
 
+### `MigrateError` — Error Types
+
+All operations return `Result<_, MigrateError>`:
+
+| Variant | When | Fields |
+|---------|------|--------|
+| `Turso(turso::Error)` | Underlying database error | Source error |
+| `Io { path, source }` | File read failure (converge_from_path) | Path + IO error |
+| `Statement { stmt, source, phase }` | SQL execution failed | The SQL, error, and phase (`DDL`, `FTS`, or `views_triggers`) |
+| `ForeignKeyViolation { table, rowid, parent }` | FK check failed after rebuild | Table, row, and referenced parent |
+| `Schema(String)` | Schema validation error (e.g., NOT NULL without DEFAULT) | Descriptive message |
+| `PolicyViolation { message, blocked_operations }` | Policy blocked a destructive change | What was blocked and why |
+
 ## How It Works
 
 ```
@@ -237,6 +266,9 @@ Internal tables (`_schema_meta`, `_converge_new_*`, `sqlite_*`, etc.) are never 
 
 ### AUTOINCREMENT Preservation
 Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT counters aren't reset.
+
+### Busy Timeout
+`PRAGMA busy_timeout` is set before migration execution (configurable via `ConvergeOptions.busy_timeout`, default 5 seconds). This prevents `SQLITE_BUSY` errors when another connection holds a write lock.
 
 ## Supported Features
 
@@ -370,7 +402,7 @@ turso-migrate is a Rust implementation of the approach described in David Rothli
 | Introspection | `PRAGMA table_info` | `PRAGMA table_xinfo` + `index_list` + `foreign_key_list` |
 | Schema model | Basic columns | COLLATE, GENERATED, UNIQUE, STRICT, WITHOUT ROWID, AUTOINCREMENT |
 | Safety | None | Policy enforcement, NOT NULL validation, protected namespaces |
-| API | Single function | `converge` + `converge_with_options` + `Migrator` + `SchemaDiff` Display |
+| API | Single function | `converge` + `converge_with_options` + `SchemaDiff` Display |
 | Observability | None | Structured tracing + ConvergeReport |
 
 ## License
