@@ -1,6 +1,6 @@
 # turso-migrate
 
-Declarative schema convergence for [Turso](https://turso.tech/) and libSQL databases.
+Declarative schema convergence for [Turso](https://turso.tech/) databases.
 
 Instead of numbered migration files (`001_up.sql`, `002_up.sql`, ...), you define your desired schema in a single SQL file and turso-migrate automatically diffs and converges any database to match it. A BLAKE3 hash fast-path makes subsequent checks near-instant when the schema hasn't changed.
 
