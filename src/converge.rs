@@ -37,8 +37,11 @@ pub async fn converge_with_options(
     let is_crash_recovery = in_progress.as_deref() == Some("1");
 
     if stored_hash.as_deref() == Some(schema_hash.as_str()) && !is_crash_recovery {
-        tracing::debug!(hash = %schema_hash, "converge: fast-path, schema unchanged");
-        return Ok(ConvergeReport::fast_path(start.elapsed()));
+        if !detect_drift(conn).await? {
+            tracing::debug!(hash = %schema_hash, "converge: fast-path, schema unchanged");
+            return Ok(ConvergeReport::fast_path(start.elapsed()));
+        }
+        tracing::warn!("converge: schema drift detected, forcing slow-path");
     }
 
     if is_crash_recovery {
@@ -152,6 +155,58 @@ fn check_policy(
     Ok(())
 }
 
+async fn detect_drift(conn: &turso::Connection) -> Result<bool, MigrateError> {
+    let result = conn.query("PRAGMA schema_version", ()).await;
+    let current_sv = match result {
+        Ok(mut rows) => {
+            if let Ok(Some(row)) = rows.next().await {
+                row.get::<i64>(0).unwrap_or(0)
+            } else {
+                return Ok(false);
+            }
+        }
+        Err(_) => return Ok(false),
+    };
+
+    let stored_sv = get_meta(conn, "sqlite_schema_version").await?;
+    if stored_sv.as_deref() == Some(&current_sv.to_string()) {
+        return Ok(false);
+    }
+
+    tracing::info!(
+        current = current_sv,
+        stored = ?stored_sv,
+        "converge: PRAGMA schema_version changed"
+    );
+    Ok(true)
+}
+
+pub async fn schema_fingerprint(conn: &turso::Connection) -> Result<String, MigrateError> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema \
+             WHERE name NOT LIKE 'sqlite_%' \
+               AND name NOT LIKE '_schema_meta%' \
+               AND name NOT LIKE '_converge_new_%' \
+             ORDER BY name",
+            (),
+        )
+        .await?;
+
+    let mut hasher = blake3::Hasher::new();
+    while let Some(row) = rows.next().await? {
+        let type_: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let sql: Option<String> = row.get(3)?;
+        hasher.update(type_.as_bytes());
+        hasher.update(name.as_bytes());
+        if let Some(s) = sql {
+            hasher.update(crate::diff::normalize_for_hash(&s).as_bytes());
+        }
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 async fn update_state_atomically(
     conn: &turso::Connection,
     schema_hash: &str,
@@ -165,6 +220,14 @@ async fn update_state_atomically(
 
         if had_ddl {
             increment_schema_version(conn).await?;
+        }
+
+        let sv_result = conn.query("PRAGMA schema_version", ()).await;
+        if let Ok(mut rows) = sv_result {
+            if let Ok(Some(row)) = rows.next().await {
+                let sv: i64 = row.get(0).unwrap_or(0);
+                set_meta(conn, "sqlite_schema_version", &sv.to_string()).await?;
+            }
         }
 
         Ok::<(), MigrateError>(())

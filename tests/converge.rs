@@ -280,3 +280,35 @@ async fn state_update_is_atomic() {
     let version = schema_version(&conn).await.unwrap();
     assert_eq!(version, 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drift_detection_forces_slow_path() {
+    let (_db, conn) = empty_db().await;
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        ..Default::default()
+    };
+    let r1 = converge_with_options(&conn, test_schema(), &options)
+        .await
+        .unwrap();
+    assert_eq!(r1.mode, ConvergeMode::SlowPath);
+
+    conn.execute("CREATE TABLE drift_table (id TEXT PRIMARY KEY)", ())
+        .await
+        .unwrap();
+
+    let r2 = converge_with_options(&conn, test_schema(), &options)
+        .await
+        .unwrap();
+    assert!(
+        r2.mode == ConvergeMode::SlowPath,
+        "Out-of-band DDL should trigger slow-path via drift detection, got {:?}",
+        r2.mode
+    );
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(
+        !snap.has_table("drift_table"),
+        "Drift table should be dropped by convergence"
+    );
+}
