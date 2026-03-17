@@ -17,4 +17,9 @@ pub enum MigrateError {
     },
     #[error("schema error: {0}")]
     Schema(String),
+    #[error("policy violation: {message}")]
+    PolicyViolation {
+        message: String,
+        blocked_operations: Vec<String>,
+    },
 }

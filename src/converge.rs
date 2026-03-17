@@ -1,10 +1,27 @@
 use std::path::Path;
+use std::time::Instant;
 
 use crate::diff::normalize_for_hash;
+use crate::options::{ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport};
 use crate::schema::SchemaSnapshot;
 use crate::{MigrateError, compute_diff, execute_plan, generate_plan};
 
 pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), MigrateError> {
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        ..Default::default()
+    };
+    converge_with_options(conn, schema_sql, &options).await?;
+    Ok(())
+}
+
+pub async fn converge_with_options(
+    conn: &turso::Connection,
+    schema_sql: &str,
+    options: &ConvergeOptions,
+) -> Result<ConvergeReport, MigrateError> {
+    let start = Instant::now();
+
     if schema_sql.trim().is_empty() {
         return Err(MigrateError::Schema("empty schema SQL".into()));
     }
@@ -17,29 +34,148 @@ pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), 
     let stored_hash = get_meta(conn, "schema_hash").await?;
     let in_progress = get_meta(conn, "migration_in_progress").await?;
 
-    if stored_hash.as_deref() == Some(schema_hash.as_str()) && in_progress.as_deref() != Some("1") {
-        return Ok(());
+    let is_crash_recovery = in_progress.as_deref() == Some("1");
+
+    if stored_hash.as_deref() == Some(schema_hash.as_str()) && !is_crash_recovery {
+        tracing::debug!(hash = %schema_hash, "converge: fast-path, schema unchanged");
+        return Ok(ConvergeReport::fast_path(start.elapsed()));
+    }
+
+    if is_crash_recovery {
+        tracing::warn!("converge: crash recovery detected, forcing slow-path");
     }
 
     set_meta(conn, "migration_in_progress", "1").await?;
 
+    tracing::info!("converge: slow-path, computing diff");
     let desired = SchemaSnapshot::from_schema_sql(schema_sql).await?;
     let actual = SchemaSnapshot::from_connection(conn).await?;
 
     let diff = compute_diff(&desired, &actual);
     let had_ddl = !diff.is_empty();
+
     if had_ddl {
+        check_policy(&diff, &options.policy)?;
+
+        tracing::info!(
+            tables_create = diff.tables_to_create.len(),
+            tables_drop = diff.tables_to_drop.len(),
+            tables_rebuild = diff.tables_to_rebuild.len(),
+            columns_add = diff.columns_to_add.len(),
+            "converge: generating migration plan"
+        );
+
         let plan = generate_plan(&diff, &desired, &actual)?;
+
+        if options.dry_run {
+            tracing::info!("converge: dry-run mode, skipping execution");
+            let mut all_stmts = plan.transactional_stmts.clone();
+            all_stmts.extend(plan.non_transactional_stmts.clone());
+            return Ok(ConvergeReport {
+                mode: ConvergeMode::DryRun,
+                tables_created: diff.tables_to_create.len(),
+                tables_rebuilt: diff.tables_to_rebuild.len(),
+                tables_dropped: diff.tables_to_drop.len(),
+                columns_added: diff.columns_to_add.len(),
+                indexes_changed: diff.indexes_to_create.len() + diff.fts_indexes_to_create.len(),
+                views_changed: diff.views_to_create.len(),
+                duration: start.elapsed(),
+                plan_sql: all_stmts,
+            });
+        }
+
+        tracing::info!(
+            transactional = plan.transactional_stmts.len(),
+            non_transactional = plan.non_transactional_stmts.len(),
+            "converge: executing migration plan"
+        );
         execute_plan(conn, &plan).await?;
     }
 
-    set_meta(conn, "schema_hash", schema_hash.as_str()).await?;
-    delete_meta(conn, "migration_in_progress").await?;
+    update_state_atomically(conn, &schema_hash, had_ddl).await?;
 
-    if had_ddl {
-        increment_schema_version(conn).await?;
+    let mode = if is_crash_recovery {
+        ConvergeMode::CrashRecovery
+    } else if had_ddl {
+        ConvergeMode::SlowPath
+    } else {
+        ConvergeMode::NoOp
+    };
+
+    tracing::info!(mode = ?mode, elapsed_ms = start.elapsed().as_millis(), "converge: complete");
+
+    Ok(ConvergeReport {
+        mode,
+        tables_created: diff.tables_to_create.len(),
+        tables_rebuilt: diff.tables_to_rebuild.len(),
+        tables_dropped: diff.tables_to_drop.len(),
+        columns_added: diff.columns_to_add.len(),
+        indexes_changed: diff.indexes_to_create.len() + diff.fts_indexes_to_create.len(),
+        views_changed: diff.views_to_create.len(),
+        duration: start.elapsed(),
+        plan_sql: Vec::new(),
+    })
+}
+
+fn check_policy(
+    diff: &crate::diff::SchemaDiff,
+    policy: &ConvergePolicy,
+) -> Result<(), MigrateError> {
+    if !policy.allow_table_drops && !diff.tables_to_drop.is_empty() {
+        return Err(MigrateError::PolicyViolation {
+            message: format!(
+                "Would drop {} table(s): {}. Set allow_table_drops=true to permit.",
+                diff.tables_to_drop.len(),
+                diff.tables_to_drop.join(", ")
+            ),
+            blocked_operations: diff
+                .tables_to_drop
+                .iter()
+                .map(|t| format!("DROP TABLE {t}"))
+                .collect(),
+        });
     }
 
+    if let Some(max) = policy.max_tables_affected {
+        let total =
+            diff.tables_to_create.len() + diff.tables_to_drop.len() + diff.tables_to_rebuild.len();
+        if total > max {
+            return Err(MigrateError::PolicyViolation {
+                message: format!(
+                    "Would affect {total} table(s), exceeding max_tables_affected={max}."
+                ),
+                blocked_operations: vec![format!("{total} tables affected")],
+            });
+        }
+    }
+
+    Ok(())
+}
+
+async fn update_state_atomically(
+    conn: &turso::Connection,
+    schema_hash: &str,
+    had_ddl: bool,
+) -> Result<(), MigrateError> {
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+
+    if let Err(e) = async {
+        set_meta(conn, "schema_hash", schema_hash).await?;
+        delete_meta(conn, "migration_in_progress").await?;
+
+        if had_ddl {
+            increment_schema_version(conn).await?;
+        }
+
+        Ok::<(), MigrateError>(())
+    }
+    .await
+    {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(e);
+    }
+
+    conn.execute("COMMIT", ()).await?;
     Ok(())
 }
 
