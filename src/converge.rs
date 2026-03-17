@@ -3,7 +3,8 @@ use std::time::Instant;
 
 use crate::diff::{compute_diff_with_hints, normalize_for_hash};
 use crate::options::{
-    ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport, DestructiveChangeSet, Failpoint,
+    ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport, DataMigration,
+    DestructiveChangeSet, Failpoint,
 };
 use crate::schema::{Capabilities, SchemaSnapshot};
 use crate::{MigrateError, generate_plan};
@@ -94,6 +95,8 @@ async fn run_slow_path(
     let diff = compute_diff_with_hints(&desired, &actual, &options.rename_hints);
     let had_ddl = !diff.is_empty();
 
+    let mut data_migrations_applied = 0usize;
+
     if had_ddl {
         check_policy(&diff, &options.policy)?;
 
@@ -142,6 +145,7 @@ async fn run_slow_path(
                 columns_renamed: diff.columns_to_rename.len(),
                 indexes_changed: diff.indexes_to_create.len() + diff.fts_indexes_to_create.len(),
                 views_changed: diff.views_to_create.len(),
+                data_migrations_applied: 0,
                 duration: start.elapsed(),
                 plan_sql: all_stmts,
             });
@@ -166,6 +170,10 @@ async fn run_slow_path(
         set_meta(conn, "migration_phase", "complete").await?;
     }
 
+    if !options.data_migrations.is_empty() {
+        data_migrations_applied = apply_data_migrations(conn, &options.data_migrations).await?;
+    }
+
     update_state_atomically(conn, schema_hash, had_ddl).await?;
 
     let mode = if is_crash_recovery {
@@ -188,6 +196,7 @@ async fn run_slow_path(
         columns_renamed: diff.columns_to_rename.len(),
         indexes_changed: diff.indexes_to_create.len() + diff.fts_indexes_to_create.len(),
         views_changed: diff.views_to_create.len(),
+        data_migrations_applied,
         duration: start.elapsed(),
         plan_sql: Vec::new(),
     })
@@ -614,4 +623,56 @@ fn write_schema_backup(path_hint: &Path, schema_sql: &str) -> Result<(), Migrate
         path: output_path,
         source,
     })
+}
+
+async fn apply_data_migrations(
+    conn: &turso::Connection,
+    migrations: &[DataMigration],
+) -> Result<usize, MigrateError> {
+    let mut applied = 0usize;
+
+    for migration in migrations {
+        if migration.id.trim().is_empty() {
+            return Err(MigrateError::Schema(
+                "data migration id must not be empty".to_string(),
+            ));
+        }
+        let key = format!("data_migration:{}", migration.id);
+        if get_meta(conn, &key).await?.is_some() {
+            continue;
+        }
+
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let mut failed = None;
+
+        for stmt in &migration.statements {
+            if let Err(source) = conn.execute(stmt, ()).await {
+                failed = Some((stmt.clone(), source));
+                break;
+            }
+        }
+
+        if let Some((stmt, source)) = failed {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(MigrateError::Statement {
+                stmt,
+                source,
+                phase: "data_migration".to_string(),
+            });
+        }
+
+        if let Err(err) = async {
+            set_meta(conn, &key, &epoch_secs().to_string()).await?;
+            conn.execute("COMMIT", ()).await?;
+            Ok::<(), MigrateError>(())
+        }
+        .await
+        {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+        applied += 1;
+    }
+
+    Ok(applied)
 }

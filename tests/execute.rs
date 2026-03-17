@@ -171,6 +171,37 @@ async fn table_rebuild_preserves_data() {
 }
 
 #[tokio::test]
+async fn rebuild_temp_table_name_uses_unique_suffix() {
+    let (_db, conn) = empty_db().await;
+    conn.execute(
+        "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, legacy TEXT)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("CREATE INDEX idx_foo_legacy ON foo(legacy)", ())
+        .await
+        .unwrap();
+
+    let desired_sql = "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT);";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        diff.tables_to_rebuild.contains(&"foo".to_string()),
+        "indexed column removal should force rebuild"
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    assert!(
+        plan.transactional_stmts
+            .iter()
+            .any(|s| s.to_ascii_lowercase().contains("_converge_new_foo_")),
+        "rebuild temp table should include unique suffix"
+    );
+}
+
+#[tokio::test]
 async fn plan_only_does_not_mutate() {
     let (_db, conn) = empty_db().await;
     let desired = SchemaSnapshot::from_schema_sql(test_schema())
@@ -488,4 +519,23 @@ async fn rebuild_with_self_referential_fk_succeeds() {
     let row2 = rows.next().await.unwrap().unwrap();
     assert_eq!(row2.get::<String>(0).unwrap(), "2");
     assert_eq!(row2.get::<String>(1).unwrap(), "1");
+}
+
+#[tokio::test]
+async fn view_creation_retries_handle_string_literal_false_dependencies() {
+    let (_db, conn) = empty_db().await;
+    let desired_sql = "\
+        CREATE TABLE base (id TEXT PRIMARY KEY, name TEXT NOT NULL);\n\
+        CREATE VIEW v1 AS SELECT id, 'v2' AS marker FROM base;\n\
+        CREATE VIEW v2 AS SELECT id FROM v1;\n";
+
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let mut rows = conn.query("SELECT id FROM v2", ()).await.unwrap();
+    assert!(rows.next().await.unwrap().is_none());
 }

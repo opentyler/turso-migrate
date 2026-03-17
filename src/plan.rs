@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::diff::SchemaDiff;
 use crate::error::MigrateError;
@@ -166,7 +167,7 @@ pub fn generate_plan(
         {
             validate_rebuild_safety(table_name, desired_table, actual_table)?;
 
-            let temp_table_name = format!("_converge_new_{table_name}");
+            let temp_table_name = make_temp_table_name(table_name);
 
             if actual_table.has_autoincrement {
                 transactional_stmts.push(format!(
@@ -515,4 +516,21 @@ fn view_depends_on_table(view_sql: &str, table_name: &str) -> bool {
         .to_ascii_lowercase()
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
         .any(|token| token == table)
+}
+
+static TEMP_TABLE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn make_temp_table_name(table_name: &str) -> String {
+    let seq = TEMP_TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let sanitized: String = table_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("_converge_new_{}_{}", sanitized, seq)
 }

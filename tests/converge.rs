@@ -1,8 +1,8 @@
 use tempfile::tempdir;
 use turso_migrate::diff::normalize_for_hash;
 use turso_migrate::{
-    ConvergeMode, ConvergeOptions, ConvergePolicy, Failpoint, MigrateError, SchemaSnapshot,
-    converge, converge_with_options, rollback_to_previous, schema_version,
+    ConvergeMode, ConvergeOptions, ConvergePolicy, DataMigration, Failpoint, MigrateError,
+    SchemaSnapshot, converge, converge_with_options, rollback_to_previous, schema_version,
 };
 
 fn test_schema() -> &'static str {
@@ -455,4 +455,42 @@ async fn backup_before_destructive_writes_snapshot_file() {
     let backup_sql = std::fs::read_to_string(&entries[0]).unwrap();
     assert!(backup_sql.contains("CREATE TABLE"));
     assert!(backup_sql.contains("extra_table"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_migrations_apply_once() {
+    let (_db, conn) = empty_db().await;
+    let schema = "CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL);";
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        data_migrations: vec![DataMigration {
+            id: "seed-users".to_string(),
+            statements: vec![
+                "INSERT INTO users (id, name) VALUES ('u1', 'alice')".to_string(),
+                "INSERT INTO users (id, name) VALUES ('u2', 'bob')".to_string(),
+            ],
+        }],
+        ..Default::default()
+    };
+
+    let r1 = converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap();
+    assert_eq!(r1.data_migrations_applied, 1);
+
+    let mut rows = conn.query("SELECT COUNT(*) FROM users", ()).await.unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let count: i64 = row.get(0).unwrap();
+    assert_eq!(count, 2);
+
+    let r2 = converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap();
+    assert_eq!(r2.data_migrations_applied, 0);
+
+    let mut rows2 = conn.query("SELECT COUNT(*) FROM users", ()).await.unwrap();
+    let row2 = rows2.next().await.unwrap().unwrap();
+    let count2: i64 = row2.get(0).unwrap();
+    assert_eq!(count2, 2);
 }

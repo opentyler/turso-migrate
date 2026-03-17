@@ -21,7 +21,7 @@ pub use diff::{SchemaDiff, compute_diff};
 pub use error::MigrateError;
 pub use execute::execute_plan;
 pub use options::{
-    ColumnRenameHint, ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport,
+    ColumnRenameHint, ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport, DataMigration,
     DestructiveChangeSet, Failpoint,
 };
 pub use plan::{MigrationPlan, generate_plan};

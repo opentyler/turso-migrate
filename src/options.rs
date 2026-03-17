@@ -10,6 +10,12 @@ pub struct ColumnRenameHint {
     pub to: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataMigration {
+    pub id: String,
+    pub statements: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DestructiveChangeSet {
     pub tables_to_drop: Vec<String>,
@@ -102,6 +108,7 @@ pub struct ConvergeOptions {
     pub busy_timeout: Duration,
     pub max_retries: u32,
     pub backup_before_destructive: Option<PathBuf>,
+    pub data_migrations: Vec<DataMigration>,
     pub rename_hints: Vec<ColumnRenameHint>,
     pub pre_destructive_hook: Option<PreDestructiveHook>,
     pub failpoint: Option<Failpoint>,
@@ -115,6 +122,7 @@ impl fmt::Debug for ConvergeOptions {
             .field("busy_timeout", &self.busy_timeout)
             .field("max_retries", &self.max_retries)
             .field("backup_before_destructive", &self.backup_before_destructive)
+            .field("data_migrations", &self.data_migrations)
             .field("rename_hints", &self.rename_hints)
             .field(
                 "pre_destructive_hook",
@@ -133,6 +141,7 @@ impl Default for ConvergeOptions {
             busy_timeout: Duration::from_secs(5),
             max_retries: 3,
             backup_before_destructive: None,
+            data_migrations: Vec::new(),
             rename_hints: Vec::new(),
             pre_destructive_hook: None,
             failpoint: None,
@@ -151,6 +160,7 @@ pub struct ConvergeReport {
     pub columns_renamed: usize,
     pub indexes_changed: usize,
     pub views_changed: usize,
+    pub data_migrations_applied: usize,
     pub duration: Duration,
     pub plan_sql: Vec<String>,
 }
@@ -167,6 +177,7 @@ impl Default for ConvergeReport {
             columns_renamed: 0,
             indexes_changed: 0,
             views_changed: 0,
+            data_migrations_applied: 0,
             duration: Duration::ZERO,
             plan_sql: Vec::new(),
         }
@@ -200,5 +211,6 @@ impl ConvergeReport {
             || self.columns_renamed > 0
             || self.indexes_changed > 0
             || self.views_changed > 0
+            || self.data_migrations_applied > 0
     }
 }

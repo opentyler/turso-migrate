@@ -36,7 +36,7 @@ pub async fn execute_plan_with_timeout(
         run_ddl_transaction(conn, &phase1, has_rebuilds, "DDL").await?;
         run_non_transactional(conn, &plan.non_transactional_stmts, "FTS").await?;
         if !phase2.is_empty() {
-            run_transaction(conn, &phase2, "views_triggers").await?;
+            run_views_and_triggers(conn, &phase2).await?;
         }
     } else {
         run_non_transactional(conn, &plan.non_transactional_stmts, "FTS").await?;
@@ -164,9 +164,110 @@ async fn run_non_transactional(
     Ok(())
 }
 
+async fn run_views_and_triggers(
+    conn: &turso::Connection,
+    stmts: &[String],
+) -> Result<(), MigrateError> {
+    if stmts.is_empty() {
+        return Ok(());
+    }
+
+    let mut view_stmts = Vec::new();
+    let mut trigger_stmts = Vec::new();
+    let mut passthrough = Vec::new();
+
+    for stmt in stmts {
+        if is_create_view(stmt) {
+            view_stmts.push(stmt.clone());
+        } else if is_create_trigger(stmt) {
+            trigger_stmts.push(stmt.clone());
+        } else {
+            passthrough.push(stmt.clone());
+        }
+    }
+
+    run_views_fixed_point(conn, &view_stmts).await?;
+    run_transaction(conn, &trigger_stmts, "triggers").await?;
+    run_transaction(conn, &passthrough, "views_triggers").await?;
+    Ok(())
+}
+
+async fn run_views_fixed_point(
+    conn: &turso::Connection,
+    views: &[String],
+) -> Result<(), MigrateError> {
+    if views.is_empty() {
+        return Ok(());
+    }
+
+    let mut remaining = views.to_vec();
+    let max_rounds = views.len().saturating_add(1);
+
+    for _ in 0..max_rounds {
+        if remaining.is_empty() {
+            return Ok(());
+        }
+
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let mut next_round = Vec::new();
+        let mut progressed = false;
+
+        for stmt in remaining {
+            match conn.execute(&stmt, ()).await {
+                Ok(_) => {
+                    progressed = true;
+                }
+                Err(source) => {
+                    if is_missing_dependency_error(&source) {
+                        next_round.push(stmt);
+                    } else {
+                        rollback(conn).await;
+                        return Err(MigrateError::Statement {
+                            stmt,
+                            source,
+                            phase: "views".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if !progressed {
+            rollback(conn).await;
+            return Err(MigrateError::Schema(
+                "Unable to resolve view creation order due to unresolved dependencies".to_string(),
+            ));
+        }
+
+        if let Err(err) = conn.execute("COMMIT", ()).await {
+            rollback(conn).await;
+            return Err(err.into());
+        }
+
+        remaining = next_round;
+    }
+
+    Err(MigrateError::Schema(
+        "Exceeded maximum rounds while resolving view dependencies".to_string(),
+    ))
+}
+
+fn is_missing_dependency_error(err: &turso::Error) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("no such table") || lower.contains("no such view")
+}
+
 fn is_create_view_or_trigger(stmt: &str) -> bool {
-    let normalized = stmt.trim_start().to_lowercase();
-    normalized.starts_with("create view")
-        || normalized.starts_with("create materialized view")
-        || normalized.starts_with("create trigger")
+    is_create_view(stmt) || is_create_trigger(stmt)
+}
+
+fn is_create_view(stmt: &str) -> bool {
+    let normalized = stmt.trim_start().to_ascii_lowercase();
+    normalized.starts_with("create view") || normalized.starts_with("create materialized view")
+}
+
+fn is_create_trigger(stmt: &str) -> bool {
+    stmt.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("create trigger")
 }

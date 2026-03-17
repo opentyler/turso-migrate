@@ -137,6 +137,7 @@ let options = ConvergeOptions {
     busy_timeout: Duration::from_secs(5),   // PRAGMA busy_timeout for SQLITE_BUSY
     max_retries: 3,
     backup_before_destructive: None,        // Optional file/dir path for pre-DDL SQL backup
+    data_migrations: vec![],                // Optional idempotent data migration steps
     rename_hints: vec![],                   // Optional explicit column rename hints
     pre_destructive_hook: None,             // Optional callback gate before destructive changes
     failpoint: None,                        // Test-only crash injection selector
@@ -160,6 +161,7 @@ pub struct ConvergeReport {
     pub columns_renamed: usize,
     pub indexes_changed: usize,
     pub views_changed: usize,
+    pub data_migrations_applied: usize,
     pub duration: Duration,
     pub plan_sql: Vec<String>,     // Populated in dry-run mode
 }
@@ -209,6 +211,28 @@ For codebases that wrap `turso::Connection`, use:
 
 ```rust
 use turso_migrate::{ConnectionLike, converge_like, schema_version_like};
+```
+
+### `DataMigration` — Idempotent Post-DDL Data Steps
+
+Data migrations run after schema convergence and are tracked in `_schema_meta` so each migration ID applies once:
+
+```rust
+use turso_migrate::{ConvergeOptions, ConvergePolicy, DataMigration, converge_with_options};
+
+let options = ConvergeOptions {
+    policy: ConvergePolicy::permissive(),
+    data_migrations: vec![DataMigration {
+        id: "seed-users".to_string(),
+        statements: vec![
+            "INSERT INTO users (id, name) VALUES ('u1', 'alice')".to_string(),
+        ],
+    }],
+    ..Default::default()
+};
+
+let report = converge_with_options(&conn, SCHEMA, &options).await?;
+println!("data migrations applied: {}", report.data_migrations_applied);
 ```
 
 ### `SchemaDiff` — Human-Readable Diff
@@ -352,6 +376,7 @@ Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT c
 | Column rename detection | ✅ (conservative heuristic + `ColumnRenameHint`) |
 | Rollback to previous schema | ✅ (`rollback_to_previous`) |
 | Multi-file schema composition | ✅ (`converge_multi*`) |
+| Idempotent data migrations | ✅ (`DataMigration` + `ConvergeOptions.data_migrations`) |
 | Read-only/replica guard | ✅ (`ReadOnly` + `is_read_only`) |
 | Pre-destructive backup snapshot | ✅ (`backup_before_destructive`) |
 | Pre-destructive callback gate | ✅ (`pre_destructive_hook`) |
@@ -405,7 +430,7 @@ Phase 2 (non-transactional):
   DROP FTS indexes → CREATE FTS indexes
 
 Phase 3 (transactional):
-  CREATE views (dependency-ordered) → CREATE triggers
+  CREATE views (fixed-point retry for unresolved deps) → CREATE triggers
 ```
 
 ## SQL Normalization
@@ -428,21 +453,15 @@ This means:
 
 **Rename detection is conservative.** Automatic rename detection only applies when there is an unambiguous 1:1 match (same type/constraints/position). Use `ColumnRenameHint` for non-positional or ambiguous rename scenarios.
 
-**No data migrations.** Schema (DDL) only. Data transforms must be done separately.
-
 **Table rebuilds copy all rows.** Large tables take proportional time.
 
-**Destructive changes are one-way.** No undo. Use `ConvergePolicy` for protection.
+**Rollback scope is single-step.** `rollback_to_previous` restores the most recent prior schema snapshot, not arbitrary historical versions.
 
 ### Implementation-Specific
 
 **COLLATE detection is SQL-based.** Extracts COLLATE clauses from CREATE TABLE SQL using pattern matching, not a full SQL parser. Unusual formatting could be missed.
 
-**View dependency detection is token-based.** A table name appearing in a string literal inside a view definition would cause unnecessary recreation (false positive).
-
 **FTS requires experimental Turso flags.** Set `.experimental_index_method(true)` and `.experimental_materialized_views(true)` on your `turso::Builder`.
-
-**Temp table names are predictable.** Rebuilds use `_converge_new_{table}`. Don't name your tables with this prefix.
 
 ## Running Tests
 
@@ -450,7 +469,7 @@ This means:
 cargo test
 ```
 
-95 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
+97 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
 
 ## CLI
 
