@@ -172,6 +172,79 @@ On database connection:
 | Triggers | ✅ |
 | Foreign keys | ✅ (dependency-ordered) |
 
+## Comparison with the Original
+
+turso-migrate is a Rust implementation of the approach described in David Rothlis and William Manley's [Simple declarative schema migration for SQLite](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) (2022). That article describes a Python migrator used in production at [stb-tester.com](https://stb-tester.com) since 2019. The core idea is identical: define desired schema in one SQL file, create an in-memory pristine database from it, introspect both databases via `sqlite_schema` and `PRAGMA table_info`, diff, and converge.
+
+turso-migrate extends the original design in several areas and inherits some of the same fundamental limitations.
+
+### What turso-migrate adds beyond the original
+
+| Area | Original (Python) | turso-migrate |
+|------|-------------------|---------------|
+| **Triggers & views** | Explicitly not supported ("not for any fundamental reason, it's just that we don't use them") | Full support: CREATE/DROP/ALTER for both, including Turso materialized views (IVM) |
+| **FTS indexes** | Not applicable (standard SQLite) | Full support for Turso's tantivy-powered FTS indexes (`CREATE INDEX ... USING fts`), handled in a separate non-transactional execution phase because Turso FTS cannot run inside transactions |
+| **Vector columns** | Not applicable | `vector32(N)` columns are diffed and preserved during table rebuilds |
+| **Schema change detection** | None — always runs full introspection | BLAKE3 hash fast-path: stores hash of schema SQL in `_schema_meta`, skips everything on match (<1ms) |
+| **Crash recovery** | None | Sets `migration_in_progress` flag before convergence, clears after. On next startup, a set flag forces slow-path re-convergence regardless of hash match |
+| **FK-aware table creation** | Tables created in schema-file order | Topological sort by REFERENCES: tables are created in FK dependency order so constraints are satisfied |
+| **Execution model** | Single transaction for all DDL | Three-phase execution: (1) transactional DDL, (2) non-transactional FTS, (3) transactional views/triggers — because FTS index creation cannot run inside a transaction |
+| **Schema generation** | Not included (mentions Graphviz ER diagrams) | `SchemaSnapshot::to_sql()` generates deterministic DDL from a live database, useful for bootstrapping |
+| **Dry-run mode** | Not mentioned | `Migrator::plan()` returns the migration plan without executing it |
+| **Schema versioning** | Uses SQLite's `PRAGMA user_version` | Maintains `schema_version` table with version counter and timestamp, incremented on each DDL change |
+
+### Limitations shared with the original
+
+These are fundamental to the declarative approach, not implementation bugs:
+
+**No column rename detection.** If you rename a column from `name` to `display_name`, the migrator sees "column `name` removed, column `display_name` added." Data in the old column is lost. The original article handles this the same way — the migrator treats it as a table rebuild where only shared column names are copied.
+
+*Workaround:* Run a manual `ALTER TABLE ... RENAME COLUMN` before calling `converge()`.
+
+**No data migrations.** The migrator handles schema (DDL) only. If you need to transform existing data — populate a new column from old columns, backfill a NOT NULL column, migrate data between tables — you must do that separately.
+
+*Workaround:* Run data migration SQL after `converge()`, guarded by idempotent `WHERE` clauses (same pattern the original article recommends).
+
+**Table rebuilds are slow with large data.** When a column changes type, gains/loses NOT NULL, or changes its default, the migrator follows SQLite's [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter): create temp table → INSERT INTO ... SELECT → DROP original → RENAME temp. This copies every row. On a million-row table, this takes real time.
+
+**Table rebuilds may change rowid values.** The original article notes this too. If your code depends on SQLite's internal rowid staying stable across migrations, table rebuilds will break that assumption.
+
+**Destructive changes are one-way.** There is no "undo" or "rollback to previous schema." If you drop a column or table, the data is gone. The `Migrator` API has `allow_deletions(false)` (same as the original) to prevent accidental drops, but `converge()` allows deletions by default.
+
+### Limitations specific to turso-migrate
+
+These are implementation limitations that could be improved:
+
+**FK reference extraction is manual byte-by-byte parsing.** The `referenced_tables()` function in `plan.rs` parses `REFERENCES table_name` by scanning bytes rather than using a SQL parser. It handles quoted identifiers (`"table"`) and unquoted names correctly for simple cases, but complex FK syntax (multi-column references, inline constraints mixed with comments) could confuse it. This affects FK-aware table creation ordering.
+
+*Risk:* Low in practice — FK references in schema SQL are typically straightforward. A SQL parser would be more robust but adds a dependency.
+
+**View dependency detection is token-based.** `view_depends_on_table()` checks if a table name appears as a word token in the view SQL. This can produce false positives (a table name that appears in a string literal or comment would match) and false negatives (aliased or qualified references might not match the simple token check).
+
+*Risk:* Medium — false positives cause unnecessary view recreation (harmless but wasteful). False negatives could leave a view referencing a stale table after rebuild.
+
+**SQL comparison uses whitespace normalization.** The diff engine compares `CREATE` statements by collapsing whitespace and lowercasing. Two statements that are semantically identical but syntactically different in ways beyond whitespace (e.g., `INTEGER` vs `INT`, extra parentheses) will be seen as different, triggering unnecessary rebuilds.
+
+*Risk:* Low — unnecessary rebuilds are harmless (idempotent), just slower.
+
+**Temp table names are predictable.** Table rebuilds use `_converge_new_{table_name}` as the temporary table name. If your schema has a table with that name, the rebuild will conflict.
+
+*Risk:* Negligible — don't name your tables `_converge_new_*`.
+
+**No VACUUM after migrations.** The original article runs VACUUM to repack the database file after migrations. turso-migrate does not. After dropping tables or rebuilding large tables, the database file may contain free pages that aren't reclaimed.
+
+*Workaround:* Run `VACUUM` manually after convergence if file size matters.
+
+**FTS indexes require experimental Turso features.** FTS (`USING fts`) and materialized views are gated behind `turso::Builder` flags (`.experimental_index_method(true)`, `.experimental_materialized_views(true)`). If these flags aren't set on the target database connection, convergence will fail when trying to create FTS indexes. The error message from Turso (`"unknown module name 'fts'"`) doesn't indicate the fix.
+
+*Workaround:* Always set both experimental flags on the `turso::Builder` if your schema uses FTS or materialized views. The Quick Start section of this README shows the correct setup.
+
+**No `allow_deletions` flag on `converge()`.** The `Migrator` builder API has `.allow_deletions(false)` to prevent accidental table/column drops. The simpler `converge()` function always allows deletions. If you need deletion protection, use `Migrator` instead.
+
+**Hash sensitivity to whitespace.** The BLAKE3 fast-path hashes the raw `schema_sql` bytes. If you reformat the schema file (add a trailing newline, change indentation), the hash changes and triggers a full convergence — even though the schema is semantically identical. The full convergence will then find no diff and complete quickly, but it's slower than the fast-path.
+
+*Workaround:* None needed — the slow path correctly detects "no changes" and finishes fast. It's just not sub-millisecond like a hash match.
+
 ## Running Tests
 
 ```bash
@@ -190,6 +263,7 @@ Tests use in-memory Turso databases — no external services needed. The test su
 
 ## Inspiration & References
 
+- [Simple declarative schema migration for SQLite (Rothlis & Manley, 2022)](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) — **The direct inspiration for turso-migrate.** Python implementation of the same core algorithm: pristine DB from schema SQL → introspect both → diff → converge. turso-migrate extends this with BLAKE3 fast-path, crash recovery, FTS/vector/view/trigger support, and FK-aware ordering. See "Comparison with the Original" above for a detailed breakdown.
 - [Declarative vs Versioned Migrations (Atlas)](https://atlasgo.io/concepts/declarative-vs-versioned) — The declarative migration paradigm that turso-migrate implements
 - [Deep Dive into Declarative Migrations (Atlas)](https://atlasgo.io/blog/2024/10/31/declarative-migrations-deepdive) — Design philosophy and challenges
 - [Database per User (Turso)](https://turso.tech/blog/give-each-of-your-users-their-own-sqlite-database-b74445f4) — The per-user database architecture that motivated constant-cost convergence
