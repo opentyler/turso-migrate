@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 
 use tempfile::tempdir;
-use turso_migrate::{MigrateError, SchemaSnapshot, converge, converge_from_path};
+use turso_migrate::{
+    ConnectionLike, ConvergeMode, ConvergeOptions, ConvergePolicy, MigrateError, SchemaSnapshot,
+    converge, converge_from_path, converge_like, converge_multi, converge_multi_with_options,
+    is_read_only, schema_version_like, validate_schema,
+};
 
 fn test_schema() -> &'static str {
     include_str!("fixtures/schema.sql")
@@ -98,7 +102,7 @@ async fn to_sql_round_trips() {
     let tables1: Vec<_> = snap1
         .tables
         .keys()
-        .filter(|name| name.as_str() != "schema_version")
+        .filter(|name| name.raw() != "schema_version")
         .cloned()
         .collect();
     let tables2: Vec<_> = snap2.tables.keys().cloned().collect();
@@ -137,4 +141,86 @@ async fn to_sql_empty_snapshot() {
     };
 
     assert_eq!(snap.to_sql(), "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_schema_accepts_valid_sql() {
+    validate_schema(test_schema()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_schema_rejects_invalid_sql() {
+    let err = validate_schema("CREATE TABLE broken (").await.unwrap_err();
+    assert!(matches!(err, MigrateError::Schema(_)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn converge_multi_combines_schema_parts() {
+    let (_db, conn) = empty_db().await;
+    let parts = [
+        "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);",
+        "CREATE TABLE posts (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id));",
+        "CREATE INDEX idx_posts_user ON posts(user_id);",
+    ];
+
+    converge_multi(&conn, &parts).await.unwrap();
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(snap.has_table("users"));
+    assert!(snap.has_table("posts"));
+    assert!(snap.has_index("idx_posts_user"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn converge_multi_with_options_supports_dry_run() {
+    let (_db, conn) = empty_db().await;
+    let parts = [
+        "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);",
+        "CREATE TABLE posts (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id));",
+    ];
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        dry_run: true,
+        ..Default::default()
+    };
+
+    let report = converge_multi_with_options(&conn, &parts, &options)
+        .await
+        .unwrap();
+    assert_eq!(report.mode, ConvergeMode::DryRun);
+    assert!(!report.plan_sql.is_empty());
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(snap.tables.is_empty(), "dry-run should not mutate DB");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn is_read_only_reflects_query_only_pragma() {
+    let (_db, conn) = empty_db().await;
+    assert!(!is_read_only(&conn).await.unwrap());
+
+    conn.execute("PRAGMA query_only = 1", ()).await.unwrap();
+    assert!(is_read_only(&conn).await.unwrap());
+    conn.execute("PRAGMA query_only = 0", ()).await.unwrap();
+}
+
+struct WrappedConnection<'a> {
+    inner: &'a turso::Connection,
+}
+
+impl ConnectionLike for WrappedConnection<'_> {
+    fn as_turso_connection(&self) -> &turso::Connection {
+        self.inner
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_like_wrappers_work() {
+    let (_db, conn) = empty_db().await;
+    let wrapped = WrappedConnection { inner: &conn };
+
+    converge_like(&wrapped, test_schema()).await.unwrap();
+    let version = schema_version_like(&wrapped).await.unwrap();
+    assert_eq!(version, 1);
 }

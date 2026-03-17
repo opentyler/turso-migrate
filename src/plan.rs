@@ -1,6 +1,9 @@
 use std::collections::{BTreeSet, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{ColumnInfo, SchemaDiff, SchemaSnapshot};
+use crate::diff::SchemaDiff;
+use crate::error::MigrateError;
+use crate::schema::{ColumnInfo, SchemaSnapshot};
 
 #[derive(Debug, Clone)]
 pub struct MigrationPlan {
@@ -25,74 +28,82 @@ pub fn generate_plan(
     diff: &SchemaDiff,
     desired: &SchemaSnapshot,
     actual: &SchemaSnapshot,
-) -> MigrationPlan {
+) -> Result<MigrationPlan, MigrateError> {
     let rebuilt_tables: BTreeSet<String> = diff.tables_to_rebuild.iter().cloned().collect();
+    let rebuilt_lower: HashSet<String> = rebuilt_tables
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
 
-    let altered_tables: BTreeSet<String> =
-        diff.columns_to_add.iter().map(|(t, _)| t.clone()).collect();
+    let altered_tables: BTreeSet<String> = diff
+        .columns_to_add
+        .iter()
+        .map(|(t, _)| t.clone())
+        .chain(diff.columns_to_rename.iter().map(|(t, _, _)| t.clone()))
+        .collect();
 
     let mut views_to_drop: BTreeSet<String> = diff.views_to_drop.iter().cloned().collect();
     let mut views_to_create: BTreeSet<String> = diff.views_to_create.iter().cloned().collect();
 
     for (name, view) in &actual.views {
-        if rebuilt_tables
+        if rebuilt_lower
             .iter()
             .any(|table| view_depends_on_table(&view.sql, table))
         {
-            views_to_drop.insert(name.clone());
+            views_to_drop.insert(name.raw().to_string());
         }
     }
     for (name, view) in &desired.views {
-        if rebuilt_tables
+        if rebuilt_lower
             .iter()
             .any(|table| view_depends_on_table(&view.sql, table))
         {
-            views_to_create.insert(name.clone());
+            views_to_create.insert(name.raw().to_string());
         }
     }
 
     let mut triggers_to_drop: BTreeSet<String> = diff.triggers_to_drop.iter().cloned().collect();
-    for (name, trigger) in &actual.triggers {
-        if rebuilt_tables.contains(&trigger.table_name) {
-            triggers_to_drop.insert(name.clone());
+    for trigger in actual.triggers.values() {
+        if rebuilt_lower.contains(&trigger.table_name.to_ascii_lowercase()) {
+            triggers_to_drop.insert(trigger.name.clone());
         }
     }
 
     let mut triggers_to_create: BTreeSet<String> =
         diff.triggers_to_create.iter().cloned().collect();
-    for (name, trigger) in &desired.triggers {
-        if rebuilt_tables.contains(&trigger.table_name) {
-            triggers_to_create.insert(name.clone());
+    for trigger in desired.triggers.values() {
+        if rebuilt_lower.contains(&trigger.table_name.to_ascii_lowercase()) {
+            triggers_to_create.insert(trigger.name.clone());
         }
     }
 
     let mut indexes_to_drop: BTreeSet<String> = diff.indexes_to_drop.iter().cloned().collect();
-    for (name, idx) in &actual.indexes {
-        if !idx.is_fts && rebuilt_tables.contains(&idx.table_name) {
-            indexes_to_drop.insert(name.clone());
+    for idx in actual.indexes.values() {
+        if !idx.is_fts && rebuilt_lower.contains(&idx.table_name.to_ascii_lowercase()) {
+            indexes_to_drop.insert(idx.name.clone());
         }
     }
 
     let mut indexes_to_create: BTreeSet<String> = diff.indexes_to_create.iter().cloned().collect();
-    for (name, idx) in &desired.indexes {
-        if !idx.is_fts && rebuilt_tables.contains(&idx.table_name) {
-            indexes_to_create.insert(name.clone());
+    for idx in desired.indexes.values() {
+        if !idx.is_fts && rebuilt_lower.contains(&idx.table_name.to_ascii_lowercase()) {
+            indexes_to_create.insert(idx.name.clone());
         }
     }
 
     let mut fts_indexes_to_drop: BTreeSet<String> =
         diff.fts_indexes_to_drop.iter().cloned().collect();
-    for (name, idx) in &actual.indexes {
-        if idx.is_fts && rebuilt_tables.contains(&idx.table_name) {
-            fts_indexes_to_drop.insert(name.clone());
+    for idx in actual.indexes.values() {
+        if idx.is_fts && rebuilt_lower.contains(&idx.table_name.to_ascii_lowercase()) {
+            fts_indexes_to_drop.insert(idx.name.clone());
         }
     }
 
     let mut fts_indexes_to_create: BTreeSet<String> =
         diff.fts_indexes_to_create.iter().cloned().collect();
-    for (name, idx) in &desired.indexes {
-        if idx.is_fts && rebuilt_tables.contains(&idx.table_name) {
-            fts_indexes_to_create.insert(name.clone());
+    for idx in desired.indexes.values() {
+        if idx.is_fts && rebuilt_lower.contains(&idx.table_name.to_ascii_lowercase()) {
+            fts_indexes_to_create.insert(idx.name.clone());
         }
     }
 
@@ -106,7 +117,7 @@ pub fn generate_plan(
     }
 
     for view_name in &views_to_drop {
-        if actual.views.contains_key(view_name) {
+        if actual.has_view(view_name) {
             transactional_stmts.push(format!("DROP VIEW IF EXISTS {}", quote_ident(view_name)));
         }
     }
@@ -116,26 +127,57 @@ pub fn generate_plan(
     }
 
     for table_name in &diff.tables_to_drop {
+        if is_protected_table(table_name) {
+            continue;
+        }
         transactional_stmts.push(format!("DROP TABLE IF EXISTS {}", quote_ident(table_name)));
     }
 
     let ordered_new_tables = order_new_tables(&diff.tables_to_create, desired, actual);
     for table_name in &ordered_new_tables {
-        if let Some(table) = desired.tables.get(table_name) {
+        if let Some(table) = desired.get_table(table_name) {
             transactional_stmts.push(table.sql.clone());
         }
+    }
+
+    for (table_name, old_col, new_col) in &diff.columns_to_rename {
+        transactional_stmts.push(format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            quote_ident(table_name),
+            quote_ident(old_col),
+            quote_ident(new_col)
+        ));
     }
 
     for (table_name, col) in &diff.columns_to_add {
         transactional_stmts.push(build_add_column_stmt(table_name, col));
     }
 
+    for (table_name, col_name) in &diff.columns_to_drop {
+        transactional_stmts.push(format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            quote_ident(table_name),
+            quote_ident(col_name)
+        ));
+    }
+
     for table_name in &diff.tables_to_rebuild {
-        if let (Some(desired_table), Some(actual_table)) = (
-            desired.tables.get(table_name),
-            actual.tables.get(table_name),
-        ) {
-            let temp_table_name = format!("_converge_new_{table_name}");
+        if let (Some(desired_table), Some(actual_table)) =
+            (desired.get_table(table_name), actual.get_table(table_name))
+        {
+            validate_rebuild_safety(table_name, desired_table, actual_table)?;
+
+            let temp_table_name = make_temp_table_name(table_name);
+
+            if actual_table.has_autoincrement {
+                transactional_stmts.push(format!(
+                    "INSERT OR REPLACE INTO _schema_meta (key, value) \
+                     SELECT 'autoincrement_seq_{}', seq FROM sqlite_sequence WHERE name = '{}'",
+                    table_name.replace('\'', "''"),
+                    table_name.replace('\'', "''")
+                ));
+            }
+
             transactional_stmts.push(rewrite_create_table_name(
                 &desired_table.sql,
                 &temp_table_name,
@@ -152,23 +194,38 @@ pub fn generate_plan(
                 quote_ident(&temp_table_name),
                 quote_ident(table_name)
             ));
+
+            if desired_table.has_autoincrement {
+                transactional_stmts.push(format!(
+                    "INSERT OR REPLACE INTO sqlite_sequence (name, seq) \
+                     SELECT '{}', CAST(value AS INTEGER) FROM _schema_meta \
+                     WHERE key = 'autoincrement_seq_{}'",
+                    table_name.replace('\'', "''"),
+                    table_name.replace('\'', "''")
+                ));
+                transactional_stmts.push(format!(
+                    "DELETE FROM _schema_meta WHERE key = 'autoincrement_seq_{}'",
+                    table_name.replace('\'', "''")
+                ));
+            }
         }
     }
 
     for idx_name in &indexes_to_create {
-        if let Some(index) = desired.indexes.get(idx_name) {
+        if let Some(index) = desired.get_index(idx_name) {
             transactional_stmts.push(index.sql.clone());
         }
     }
 
-    for view_name in &views_to_create {
-        if let Some(view) = desired.views.get(view_name) {
-            transactional_stmts.push(sanitize_view_sql(&view.sql));
+    let ordered_views = order_view_creation(&views_to_create, desired);
+    for view_name in &ordered_views {
+        if let Some(view) = desired.get_view(view_name) {
+            transactional_stmts.push(view.sql.clone());
         }
     }
 
     for trigger_name in &triggers_to_create {
-        if let Some(trigger) = desired.triggers.get(trigger_name) {
+        if let Some(trigger) = desired.get_trigger(trigger_name) {
             transactional_stmts.push(trigger.sql.clone());
         }
     }
@@ -179,33 +236,33 @@ pub fn generate_plan(
         non_transactional_stmts.push(format!("DROP INDEX IF EXISTS {}", quote_ident(idx_name)));
     }
     for idx_name in &fts_indexes_to_create {
-        if let Some(index) = desired.indexes.get(idx_name) {
+        if let Some(index) = desired.get_index(idx_name) {
             non_transactional_stmts.push(index.sql.clone());
         }
     }
 
     let new_indexes: BTreeSet<String> = indexes_to_create
         .iter()
-        .filter(|name| !actual.indexes.contains_key(*name))
+        .filter(|name| !actual.has_index(name))
         .cloned()
         .collect();
     let changed_indexes: BTreeSet<String> = indexes_to_create
         .iter()
-        .filter(|name| actual.indexes.contains_key(*name))
+        .filter(|name| actual.has_index(name))
         .cloned()
         .collect();
     let new_views: BTreeSet<String> = views_to_create
         .iter()
-        .filter(|name| !actual.views.contains_key(*name))
+        .filter(|name| !actual.has_view(name))
         .cloned()
         .collect();
     let changed_views: BTreeSet<String> = views_to_create
         .iter()
-        .filter(|name| actual.views.contains_key(*name))
+        .filter(|name| actual.has_view(name))
         .cloned()
         .collect();
 
-    MigrationPlan {
+    Ok(MigrationPlan {
         new_tables: ordered_new_tables,
         altered_tables: altered_tables.into_iter().collect(),
         rebuilt_tables: rebuilt_tables.into_iter().collect(),
@@ -215,7 +272,7 @@ pub fn generate_plan(
         changed_views: changed_views.into_iter().collect(),
         transactional_stmts,
         non_transactional_stmts,
-    }
+    })
 }
 
 fn order_new_tables(
@@ -224,7 +281,11 @@ fn order_new_tables(
     actual: &SchemaSnapshot,
 ) -> Vec<String> {
     let mut remaining: BTreeSet<String> = to_create.iter().cloned().collect();
-    let existing: HashSet<&str> = actual.tables.keys().map(|s| s.as_str()).collect();
+    let existing: HashSet<String> = actual
+        .tables
+        .keys()
+        .map(|k| k.lower().to_string())
+        .collect();
     let mut ordered = Vec::new();
 
     while !remaining.is_empty() {
@@ -233,14 +294,13 @@ fn order_new_tables(
 
         for table in candidates {
             let refs = desired
-                .tables
-                .get(&table)
-                .map(|t| referenced_tables(&t.sql))
+                .get_table(&table)
+                .map(|t| t.referenced_tables())
                 .unwrap_or_default();
 
             let ready = refs
                 .into_iter()
-                .all(|r| existing.contains(r.as_str()) || !remaining.contains(&r));
+                .all(|r| existing.contains(&r.to_ascii_lowercase()) || !remaining.contains(&r));
 
             if ready {
                 remaining.remove(&table);
@@ -258,57 +318,75 @@ fn order_new_tables(
     ordered
 }
 
-pub(crate) fn referenced_tables(table_sql: &str) -> BTreeSet<String> {
-    let mut refs = BTreeSet::new();
-    let bytes = table_sql.as_bytes();
-    let lower = table_sql.to_lowercase();
-    let lower_bytes = lower.as_bytes();
-    let mut idx = 0;
+fn order_view_creation(
+    views_to_create: &BTreeSet<String>,
+    desired: &SchemaSnapshot,
+) -> Vec<String> {
+    let mut remaining: BTreeSet<String> = views_to_create.clone();
+    let mut ordered = Vec::new();
+    let max_rounds = remaining.len() + 1;
 
-    while idx < lower_bytes.len() {
-        if lower_bytes[idx..].starts_with(b"references") {
-            idx += "references".len();
-            while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
-                idx += 1;
-            }
+    for _ in 0..max_rounds {
+        if remaining.is_empty() {
+            break;
+        }
+        let mut created = Vec::new();
 
-            if idx >= bytes.len() {
-                break;
-            }
-
-            let name = if bytes[idx] == b'"' {
-                idx += 1;
-                let start = idx;
-                while idx < bytes.len() && bytes[idx] != b'"' {
-                    idx += 1;
-                }
-                let val = table_sql[start..idx].to_string();
-                if idx < bytes.len() {
-                    idx += 1;
-                }
-                val
+        for name in &remaining {
+            let depends_on_remaining = if let Some(view) = desired.get_view(name) {
+                remaining
+                    .iter()
+                    .any(|other| other != name && view_depends_on_table(&view.sql, other))
             } else {
-                let start = idx;
-                while idx < bytes.len() {
-                    let ch = bytes[idx] as char;
-                    if ch.is_ascii_alphanumeric() || ch == '_' {
-                        idx += 1;
-                    } else {
-                        break;
-                    }
-                }
-                table_sql[start..idx].to_string()
+                false
             };
 
-            if !name.is_empty() {
-                refs.insert(name);
+            if !depends_on_remaining {
+                created.push(name.clone());
             }
-        } else {
-            idx += 1;
         }
+
+        if created.is_empty() {
+            tracing::warn!("Circular view dependency detected: {:?}", remaining);
+            ordered.extend(remaining.into_iter());
+            break;
+        }
+
+        for name in &created {
+            remaining.remove(name);
+        }
+        ordered.extend(created);
     }
 
-    refs
+    ordered
+}
+
+fn validate_rebuild_safety(
+    table_name: &str,
+    desired: &crate::schema::TableInfo,
+    actual: &crate::schema::TableInfo,
+) -> Result<(), MigrateError> {
+    let actual_cols: HashSet<String> = actual
+        .columns
+        .iter()
+        .map(|c| c.name.to_ascii_lowercase())
+        .collect();
+
+    for col in &desired.columns {
+        if col.is_generated || col.is_hidden {
+            continue;
+        }
+        let is_new = !actual_cols.contains(&col.name.to_ascii_lowercase());
+        if is_new && col.notnull && col.default_value.is_none() {
+            return Err(MigrateError::Schema(format!(
+                "Table '{}' rebuild would add NOT NULL column '{}' without DEFAULT. \
+                 Existing rows would violate the constraint. \
+                 Add a DEFAULT value to the column definition.",
+                table_name, col.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn build_add_column_stmt(table_name: &str, col: &ColumnInfo) -> String {
@@ -324,35 +402,50 @@ fn build_add_column_stmt(table_name: &str, col: &ColumnInfo) -> String {
     if let Some(default) = &col.default_value {
         ddl.push_str(&format!(" DEFAULT {default}"));
     }
+    if let Some(collation) = &col.collation {
+        ddl.push_str(&format!(" COLLATE {collation}"));
+    }
     ddl
 }
 
 fn build_copy_data_stmt(
     source_table: &str,
     temp_table: &str,
-    desired_table: &crate::TableInfo,
-    actual_table: &crate::TableInfo,
+    desired_table: &crate::schema::TableInfo,
+    actual_table: &crate::schema::TableInfo,
 ) -> String {
-    let actual_cols: HashSet<&str> = actual_table
+    let actual_cols: HashSet<String> = actual_table
         .columns
         .iter()
-        .map(|c| c.name.as_str())
-        .collect();
-    let shared_cols: Vec<&str> = desired_table
-        .columns
-        .iter()
-        .filter(|c| actual_cols.contains(c.name.as_str()))
-        .map(|c| c.name.as_str())
+        .filter(|c| !c.is_generated && !c.is_hidden)
+        .map(|c| c.name.to_ascii_lowercase())
         .collect();
 
-    let cols = shared_cols
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut insert_cols = Vec::new();
+    let mut select_exprs = Vec::new();
+
+    for col in &desired_table.columns {
+        if col.is_generated || col.is_hidden {
+            continue;
+        }
+
+        let col_lower = col.name.to_ascii_lowercase();
+        insert_cols.push(quote_ident(&col.name));
+
+        if actual_cols.contains(&col_lower) {
+            select_exprs.push(quote_ident(&col.name));
+        } else if let Some(default) = &col.default_value {
+            select_exprs.push(default.clone());
+        } else {
+            select_exprs.push("NULL".to_string());
+        }
+    }
+
+    let cols_str = insert_cols.join(", ");
+    let exprs_str = select_exprs.join(", ");
 
     format!(
-        "INSERT INTO {} ({cols}) SELECT {cols} FROM {}",
+        "INSERT INTO {} ({cols_str}) SELECT {exprs_str} FROM {}",
         quote_ident(temp_table),
         quote_ident(source_table)
     )
@@ -403,25 +496,41 @@ fn rewrite_create_table_name(create_sql: &str, temp_table_name: &str) -> String 
     )
 }
 
-fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+fn is_protected_table(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "_schema_meta"
+        || lower.starts_with("_converge_new_")
+        || lower.starts_with("sqlite_")
+        || lower.starts_with("fts_dir_")
+        || lower.starts_with("__turso_internal")
+        || lower == "_turso_migrations"
+}
+
 fn view_depends_on_table(view_sql: &str, table_name: &str) -> bool {
-    let table = table_name.to_lowercase();
+    let table = table_name.to_ascii_lowercase();
     view_sql
-        .to_lowercase()
+        .to_ascii_lowercase()
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
         .any(|token| token == table)
 }
 
-fn sanitize_view_sql(sql: &str) -> String {
-    sql.replace("COUNT (", "COUNT(")
-        .replace("AVG (", "AVG(")
-        .replace("MIN (", "MIN(")
-        .replace("MAX (", "MAX(")
-        .replace("count (", "count(")
-        .replace("avg (", "avg(")
-        .replace("min (", "min(")
-        .replace("max (", "max(")
+static TEMP_TABLE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn make_temp_table_name(table_name: &str) -> String {
+    let seq = TEMP_TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let sanitized: String = table_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("_converge_new_{}_{}", sanitized, seq)
 }

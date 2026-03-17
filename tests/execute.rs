@@ -25,7 +25,7 @@ async fn fresh_db_convergence() {
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     assert!(!plan.is_empty());
 
     let docs_pos = plan
@@ -55,7 +55,7 @@ async fn idempotent_convergence() {
 
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
 
     let actual2 = SchemaSnapshot::from_connection(&conn).await.unwrap();
@@ -79,12 +79,51 @@ async fn add_column_execution() {
     let diff = compute_diff(&desired, &actual);
     assert!(!diff.columns_to_add.is_empty());
 
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
-    let foo = after.tables.get("foo").unwrap();
+    let foo = after.get_table("foo").unwrap();
     assert!(foo.columns.iter().any(|c| c.name == "extra"));
+}
+
+#[tokio::test]
+async fn rename_column_execution_preserves_data() {
+    let (_db, conn) = empty_db().await;
+    conn.execute(
+        "CREATE TABLE foo (id TEXT PRIMARY KEY, legacy_name TEXT NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("INSERT INTO foo VALUES ('1', 'alice')", ())
+        .await
+        .unwrap();
+
+    let desired_sql = "CREATE TABLE foo (id TEXT PRIMARY KEY, display_name TEXT NOT NULL);";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert_eq!(
+        diff.columns_to_rename,
+        vec![(
+            "foo".to_string(),
+            "legacy_name".to_string(),
+            "display_name".to_string()
+        )],
+        "Expected rename diff, got: {diff:?}"
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let mut rows = conn
+        .query("SELECT id, display_name FROM foo ORDER BY id", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "1");
+    assert_eq!(row.get::<String>(1).unwrap(), "alice");
 }
 
 #[tokio::test]
@@ -107,9 +146,12 @@ async fn table_rebuild_preserves_data() {
     let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    assert!(diff.tables_to_rebuild.contains(&"foo".to_string()));
+    assert!(
+        !diff.columns_to_drop.is_empty() || !diff.tables_to_rebuild.is_empty(),
+        "Should detect column removal via DROP COLUMN or rebuild"
+    );
 
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
 
     let mut rows = conn
@@ -124,8 +166,39 @@ async fn table_rebuild_preserves_data() {
     assert_eq!(row2.get::<String>(1).unwrap(), "bob");
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
-    let foo = after.tables.get("foo").unwrap();
+    let foo = after.get_table("foo").unwrap();
     assert!(!foo.columns.iter().any(|c| c.name == "legacy"));
+}
+
+#[tokio::test]
+async fn rebuild_temp_table_name_uses_unique_suffix() {
+    let (_db, conn) = empty_db().await;
+    conn.execute(
+        "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, legacy TEXT)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("CREATE INDEX idx_foo_legacy ON foo(legacy)", ())
+        .await
+        .unwrap();
+
+    let desired_sql = "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT);";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        diff.tables_to_rebuild.contains(&"foo".to_string()),
+        "indexed column removal should force rebuild"
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    assert!(
+        plan.transactional_stmts
+            .iter()
+            .any(|s| s.to_ascii_lowercase().contains("_converge_new_foo_")),
+        "rebuild temp table should include unique suffix"
+    );
 }
 
 #[tokio::test]
@@ -136,7 +209,7 @@ async fn plan_only_does_not_mutate() {
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
 
     assert!(!plan.is_empty());
 
@@ -154,7 +227,7 @@ async fn empty_plan_for_matching_schemas() {
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     assert!(plan.is_empty(), "Plan should be empty for matching schemas");
 }
 
@@ -182,11 +255,11 @@ async fn add_notnull_default_column_execution() {
         "Should NOT trigger rebuild"
     );
 
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
-    let foo = after.tables.get("foo").unwrap();
+    let foo = after.get_table("foo").unwrap();
     assert!(foo.columns.iter().any(|c| c.name == "status"));
 }
 
@@ -219,11 +292,11 @@ async fn fk_referenced_table_rebuild_preserves_integrity() {
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
     assert!(
-        diff.tables_to_rebuild.contains(&"parent".to_string()),
-        "Parent should be rebuilt (old_col removed)"
+        !diff.columns_to_drop.is_empty() || !diff.tables_to_rebuild.is_empty(),
+        "Parent should have old_col removal detected"
     );
 
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
 
     let mut rows = conn
@@ -248,7 +321,7 @@ async fn fts_index_created_outside_transaction() {
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
 
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     assert!(
         !plan.non_transactional_stmts.is_empty(),
         "FTS index should be in non-transactional stmts"
@@ -288,20 +361,22 @@ async fn materialized_view_recreated_after_table_change() {
     let desired = SchemaSnapshot::from_schema_sql(schema_v2).await.unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    assert!(diff.tables_to_rebuild.contains(&"items".to_string()));
+    assert!(
+        !diff.columns_to_drop.is_empty() || !diff.tables_to_rebuild.is_empty(),
+        "Should detect items column removal"
+    );
 
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert!(
-        after.views.contains_key("mv_counts"),
+        after.has_view("mv_counts"),
         "Materialized view should be recreated"
     );
     assert!(
         !after
-            .tables
-            .get("items")
+            .get_table("items")
             .unwrap()
             .columns
             .iter()
@@ -317,7 +392,7 @@ async fn full_schema_convergence_creates_all_objects() {
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let diff = compute_diff(&desired, &actual);
-    let plan = generate_plan(&diff, &desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
     execute_plan(&conn, &plan).await.unwrap();
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
@@ -335,4 +410,132 @@ async fn full_schema_convergence_creates_all_objects() {
         "At least 4 views, got {}",
         after.views.len()
     );
+}
+
+#[tokio::test]
+async fn rebuild_rejects_new_notnull_column_without_default() {
+    let (_db, conn) = empty_db().await;
+    conn.execute("CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT)", ())
+        .await
+        .unwrap();
+    conn.execute("INSERT INTO foo VALUES ('1', 'alice')", ())
+        .await
+        .unwrap();
+
+    let desired_sql = "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, required TEXT NOT NULL);";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert!(diff.tables_to_rebuild.contains(&"foo".to_string()));
+
+    let result = generate_plan(&diff, &desired, &actual);
+    assert!(result.is_err(), "Should reject NOT NULL without DEFAULT");
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("NOT NULL") && msg.contains("required"),
+        "Error should mention the column: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn rebuild_with_notnull_default_column_applies_default() {
+    let (_db, conn) = empty_db().await;
+    conn.execute(
+        "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, old_col TEXT)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("INSERT INTO foo VALUES ('1', 'alice', 'legacy')", ())
+        .await
+        .unwrap();
+
+    let desired_sql =
+        "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, status TEXT NOT NULL DEFAULT 'active');";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        !diff.columns_to_drop.is_empty()
+            || !diff.columns_to_add.is_empty()
+            || !diff.tables_to_rebuild.is_empty(),
+        "Should detect column changes (drop old_col + add status)"
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let mut rows = conn
+        .query("SELECT status FROM foo WHERE id = '1'", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let status: String = row.get(0).unwrap();
+    assert_eq!(
+        status, "active",
+        "Default value should be applied to existing rows during rebuild"
+    );
+}
+
+#[tokio::test]
+async fn rebuild_with_self_referential_fk_succeeds() {
+    let (_db, conn) = empty_db().await;
+    conn.execute(
+        "CREATE TABLE categories (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT REFERENCES categories(id), old_col INTEGER)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("CREATE INDEX idx_cat_old ON categories(old_col)", ())
+        .await
+        .unwrap();
+    conn.execute("INSERT INTO categories VALUES ('1', 'root', NULL, 1)", ())
+        .await
+        .unwrap();
+    conn.execute("INSERT INTO categories VALUES ('2', 'child', '1', 2)", ())
+        .await
+        .unwrap();
+
+    let desired_sql = "CREATE TABLE categories (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT REFERENCES categories(id));";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        diff.tables_to_rebuild.contains(&"categories".to_string()),
+        "Indexed column removal should force rebuild: {:?}",
+        diff
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let mut rows = conn
+        .query("SELECT id, parent_id FROM categories ORDER BY id", ())
+        .await
+        .unwrap();
+    let row1 = rows.next().await.unwrap().unwrap();
+    assert_eq!(row1.get::<String>(0).unwrap(), "1");
+    let row2 = rows.next().await.unwrap().unwrap();
+    assert_eq!(row2.get::<String>(0).unwrap(), "2");
+    assert_eq!(row2.get::<String>(1).unwrap(), "1");
+}
+
+#[tokio::test]
+async fn view_creation_retries_handle_string_literal_false_dependencies() {
+    let (_db, conn) = empty_db().await;
+    let desired_sql = "\
+        CREATE TABLE base (id TEXT PRIMARY KEY, name TEXT NOT NULL);\n\
+        CREATE VIEW v1 AS SELECT id, 'v2' AS marker FROM base;\n\
+        CREATE VIEW v2 AS SELECT id FROM v1;\n";
+
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let mut rows = conn.query("SELECT id FROM v2", ()).await.unwrap();
+    assert!(rows.next().await.unwrap().is_none());
 }
