@@ -7,8 +7,12 @@ pub enum MigrateError {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
-    #[error("migration statement failed: {stmt}; cause: {source}")]
-    Statement { stmt: String, source: turso::Error },
+    #[error("migration statement failed ({phase}): {stmt}; cause: {source}")]
+    Statement {
+        stmt: String,
+        source: turso::Error,
+        phase: String,
+    },
     #[error("foreign key violation: table={table}, rowid={rowid}, references={parent}")]
     ForeignKeyViolation {
         table: String,

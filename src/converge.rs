@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::diff::normalize_for_hash;
 use crate::options::{ConvergeMode, ConvergeOptions, ConvergePolicy, ConvergeReport};
 use crate::schema::SchemaSnapshot;
-use crate::{MigrateError, compute_diff, execute_plan, generate_plan};
+use crate::{MigrateError, compute_diff, generate_plan};
 
 pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), MigrateError> {
     let options = ConvergeOptions {
@@ -92,7 +92,7 @@ pub async fn converge_with_options(
             non_transactional = plan.non_transactional_stmts.len(),
             "converge: executing migration plan"
         );
-        execute_plan(conn, &plan).await?;
+        crate::execute::execute_plan_with_timeout(conn, &plan, options.busy_timeout).await?;
     }
 
     update_state_atomically(conn, &schema_hash, had_ddl).await?;

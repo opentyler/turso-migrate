@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::error::MigrateError;
 use crate::plan::MigrationPlan;
 
@@ -5,9 +7,22 @@ pub async fn execute_plan(
     conn: &turso::Connection,
     plan: &MigrationPlan,
 ) -> Result<(), MigrateError> {
+    execute_plan_with_timeout(conn, plan, Duration::from_secs(5)).await
+}
+
+pub async fn execute_plan_with_timeout(
+    conn: &turso::Connection,
+    plan: &MigrationPlan,
+    busy_timeout: Duration,
+) -> Result<(), MigrateError> {
     if plan.is_empty() {
         return Ok(());
     }
+
+    let timeout_ms = busy_timeout.as_millis();
+    let _ = conn
+        .execute(&format!("PRAGMA busy_timeout = {timeout_ms}"), ())
+        .await;
 
     let has_rebuilds = !plan.rebuilt_tables.is_empty();
 
@@ -18,13 +33,13 @@ pub async fn execute_plan(
             .cloned()
             .partition(|stmt| !is_create_view_or_trigger(stmt));
 
-        run_ddl_transaction(conn, &phase1, has_rebuilds).await?;
-        run_non_transactional(conn, &plan.non_transactional_stmts).await?;
+        run_ddl_transaction(conn, &phase1, has_rebuilds, "DDL").await?;
+        run_non_transactional(conn, &plan.non_transactional_stmts, "FTS").await?;
         if !phase2.is_empty() {
-            run_transaction(conn, &phase2).await?;
+            run_transaction(conn, &phase2, "views_triggers").await?;
         }
     } else {
-        run_non_transactional(conn, &plan.non_transactional_stmts).await?;
+        run_non_transactional(conn, &plan.non_transactional_stmts, "FTS").await?;
     }
 
     Ok(())
@@ -34,6 +49,7 @@ async fn run_ddl_transaction(
     conn: &turso::Connection,
     stmts: &[String],
     has_rebuilds: bool,
+    phase: &str,
 ) -> Result<(), MigrateError> {
     if stmts.is_empty() {
         return Ok(());
@@ -51,6 +67,7 @@ async fn run_ddl_transaction(
             return Err(MigrateError::Statement {
                 stmt: stmt.clone(),
                 source: err,
+                phase: phase.to_string(),
             });
         }
     }
@@ -91,7 +108,11 @@ async fn check_foreign_keys(conn: &turso::Connection) -> Result<(), MigrateError
     Ok(())
 }
 
-async fn run_transaction(conn: &turso::Connection, stmts: &[String]) -> Result<(), MigrateError> {
+async fn run_transaction(
+    conn: &turso::Connection,
+    stmts: &[String],
+    phase: &str,
+) -> Result<(), MigrateError> {
     if stmts.is_empty() {
         return Ok(());
     }
@@ -104,6 +125,7 @@ async fn run_transaction(conn: &turso::Connection, stmts: &[String]) -> Result<(
             return Err(MigrateError::Statement {
                 stmt: stmt.clone(),
                 source: err,
+                phase: phase.to_string(),
             });
         }
     }
@@ -123,6 +145,7 @@ async fn rollback(conn: &turso::Connection) {
 async fn run_non_transactional(
     conn: &turso::Connection,
     stmts: &[String],
+    phase: &str,
 ) -> Result<(), MigrateError> {
     for stmt in stmts {
         let batched = if stmt.trim_end().ends_with(';') {
@@ -135,6 +158,7 @@ async fn run_non_transactional(
             .map_err(|source| MigrateError::Statement {
                 stmt: stmt.clone(),
                 source,
+                phase: phase.to_string(),
             })?;
     }
     Ok(())
