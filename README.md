@@ -172,6 +172,66 @@ On database connection:
 | Triggers | ✅ |
 | Foreign keys | ✅ (dependency-ordered) |
 
+## SQLite's 12-Step ALTER TABLE Procedure
+
+SQLite has limited native ALTER TABLE support (only RENAME TABLE, RENAME COLUMN, ADD COLUMN, and DROP COLUMN). For all other schema changes — changing column types, adding/removing NOT NULL or DEFAULT, modifying primary keys — SQLite's official documentation prescribes a [12-step procedure](https://www.sqlite.org/lang_altertable.html#otheralter) that creates a new table, copies data, drops the old table, and renames the new one. Getting the sequence wrong can corrupt foreign key references, orphan triggers, or break views.
+
+turso-migrate follows this procedure for all table rebuilds. Here is how each step maps:
+
+| SQLite 12-Step | turso-migrate | Notes |
+|----------------|---------------|-------|
+| **1. Disable FK constraints** (`PRAGMA foreign_keys=OFF`) | **Not done.** | Turso/SQLite defaults to `foreign_keys=OFF`. If your application explicitly enables FK enforcement, turso-migrate does not temporarily disable it during migration. See "Deviations" below. |
+| **2. Start a transaction** | `BEGIN IMMEDIATE` | Wraps all transactional DDL in an explicit transaction (`execute.rs:36`). Uses `IMMEDIATE` to acquire a write lock upfront, preventing concurrent writers from causing `SQLITE_BUSY`. |
+| **3. Remember indexes, triggers, views** | Handled by introspection phase | `SchemaSnapshot::from_connection()` captures all indexes, triggers, and views from `sqlite_schema` before any DDL runs. The diff engine determines which need recreation. |
+| **4. CREATE TABLE "new_X"** | `CREATE TABLE "_converge_new_{table}" (...)` | `plan.rs:138-142`. Rewrites the desired CREATE TABLE SQL to use a temporary name. Uses the **correct** order (create new → copy → drop old → rename) as prescribed by SQLite docs, not the incorrect order (rename old → create new). |
+| **5. Copy data** | `INSERT INTO "_converge_new_{table}" (shared_cols) SELECT shared_cols FROM "{table}"` | `plan.rs:143-148`. Only copies columns that exist in both old and new schemas. New columns get their DEFAULT values. Removed columns are silently dropped. |
+| **6. Drop old table** | `DROP TABLE "{table}"` | `plan.rs:149` |
+| **7. Rename new to old** | `ALTER TABLE "_converge_new_{table}" RENAME TO "{table}"` | `plan.rs:150-154` |
+| **8. Recreate indexes, triggers, views** | Indexes, triggers, and views on rebuilt tables are automatically added to the plan | `plan.rs:54-97`. The diff engine detects that objects on rebuilt tables need recreation and adds them to the appropriate create lists. |
+| **9. Drop/recreate affected views** | `view_depends_on_table()` token check | `plan.rs:37-52`. Views that reference rebuilt tables are dropped and recreated. Detection is token-based (see "Limitations" section). |
+| **10. PRAGMA foreign_key_check** | **Not done.** | See "Deviations" below. |
+| **11. Commit transaction** | `COMMIT` | `execute.rs:48` |
+| **12. Re-enable FK constraints** | **Not done.** | See "Deviations" below. |
+
+### Statement Ordering
+
+Beyond the 12-step rebuild, turso-migrate orders all DDL carefully to avoid constraint violations:
+
+```
+Phase 1 (transactional — BEGIN IMMEDIATE ... COMMIT):
+  1. DROP triggers
+  2. DROP views (including those on rebuilt tables)
+  3. DROP indexes (including those on rebuilt tables)
+  4. DROP tables
+  5. CREATE new tables (FK-dependency topological order)
+  6. ALTER TABLE ADD COLUMN (for eligible new columns)
+  7. Table rebuilds (steps 4-7 above, for each table)
+  8. CREATE indexes
+Phase 2 (non-transactional):
+  9. DROP FTS indexes
+  10. CREATE FTS indexes
+Phase 3 (transactional — BEGIN IMMEDIATE ... COMMIT):
+  11. CREATE views (including materialized)
+  12. CREATE triggers
+```
+
+FTS indexes run outside transactions because Turso's tantivy-powered FTS engine cannot create indexes inside a transaction. Views and triggers run in a separate final transaction because they may reference FTS-indexed tables and must be created after those indexes exist.
+
+### ADD COLUMN Fast Path
+
+Not every column change requires a full table rebuild. When a new column satisfies SQLite's ADD COLUMN constraints, turso-migrate uses `ALTER TABLE ... ADD COLUMN` instead, which is O(1) regardless of table size:
+
+- Column is not a PRIMARY KEY (`pk == 0`)
+- Column is either nullable (`NOT NULL` not set) or has a `DEFAULT` value
+
+If the new column is `NOT NULL` without a `DEFAULT`, a full table rebuild is required.
+
+### Deviations from the 12-Step Procedure
+
+**Foreign key handling (steps 1, 10, 12).** turso-migrate does not disable foreign key constraints before migration, does not run `PRAGMA foreign_key_check` after, and does not re-enable them. This is safe when `PRAGMA foreign_keys=OFF` (SQLite and Turso's default), which means FK constraints are not enforced at the engine level. If your application explicitly sets `PRAGMA foreign_keys=ON`, intermediate states during a table rebuild (between DROP and RENAME) could trigger FK violations. In practice, this is unlikely because the rebuild happens within a single transaction and FK checks occur at statement execution time, but it is a theoretical gap.
+
+**No VACUUM.** The SQLite docs don't include VACUUM in the 12-step procedure, but the original Rothlis/Manley migrator runs VACUUM after migration to repack the database file. turso-migrate does not. After dropping tables or rebuilding large tables, free pages remain in the database file. Run `VACUUM` manually if file size matters.
+
 ## Comparison with the Original
 
 turso-migrate is a Rust implementation of the approach described in David Rothlis and William Manley's [Simple declarative schema migration for SQLite](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) (2022). That article describes a Python migrator used in production at [stb-tester.com](https://stb-tester.com) since 2019. The core idea is identical: define desired schema in one SQL file, create an in-memory pristine database from it, introspect both databases via `sqlite_schema` and `PRAGMA table_info`, diff, and converge.
