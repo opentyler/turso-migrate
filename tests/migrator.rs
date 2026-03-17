@@ -52,7 +52,7 @@ async fn allow_deletions_false_keeps_extra_tables() {
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert!(
-        snap.tables.contains_key("extra_legacy"),
+        snap.has_table("extra_legacy"),
         "Extra table should NOT be dropped when allow_deletions=false"
     );
 }
@@ -74,7 +74,7 @@ async fn allow_deletions_true_drops_extra_tables() {
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert!(
-        !snap.tables.contains_key("extra_legacy"),
+        !snap.has_table("extra_legacy"),
         "Extra table SHOULD be dropped when allow_deletions=true"
     );
 }

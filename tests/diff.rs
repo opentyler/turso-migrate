@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 
-use turso_migrate::SchemaSnapshot;
 use turso_migrate::diff::compute_diff;
-use turso_migrate::introspect::*;
+use turso_migrate::{CIString, ColumnInfo, IndexInfo, SchemaSnapshot, TableInfo, ViewInfo};
 
 fn test_schema() -> &'static str {
     include_str!("fixtures/schema.sql")
@@ -30,6 +29,9 @@ fn make_column(
         notnull,
         default_value: default.map(|s| s.to_string()),
         pk,
+        collation: None,
+        is_generated: false,
+        is_hidden: false,
     }
 }
 
@@ -38,14 +40,22 @@ fn make_table(name: &str, columns: Vec<ColumnInfo>) -> TableInfo {
         name: name.to_string(),
         sql: format!("CREATE TABLE {name} (...)"),
         columns,
+        foreign_keys: vec![],
+        is_strict: false,
+        is_without_rowid: false,
+        has_autoincrement: false,
     }
+}
+
+fn ci(s: &str) -> CIString {
+    CIString::new(s)
 }
 
 #[test]
 fn identical_schemas_produce_empty_diff() {
     let mut desired = empty_snapshot();
     desired.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table("foo", vec![make_column("id", "TEXT", true, None, 1)]),
     );
 
@@ -57,9 +67,7 @@ fn identical_schemas_produce_empty_diff() {
 #[test]
 fn new_table_detected() {
     let mut desired = empty_snapshot();
-    desired
-        .tables
-        .insert("foo".to_string(), make_table("foo", vec![]));
+    desired.tables.insert(ci("foo"), make_table("foo", vec![]));
     let actual = empty_snapshot();
 
     let diff = compute_diff(&desired, &actual);
@@ -70,9 +78,7 @@ fn new_table_detected() {
 fn removed_table_detected() {
     let desired = empty_snapshot();
     let mut actual = empty_snapshot();
-    actual
-        .tables
-        .insert("foo".to_string(), make_table("foo", vec![]));
+    actual.tables.insert(ci("foo"), make_table("foo", vec![]));
 
     let diff = compute_diff(&desired, &actual);
     assert_eq!(diff.tables_to_drop, vec!["foo".to_string()]);
@@ -84,11 +90,11 @@ fn added_nullable_column_detected() {
     let mut actual = empty_snapshot();
 
     actual.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table("foo", vec![make_column("id", "TEXT", true, None, 1)]),
     );
     desired.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table(
             "foo",
             vec![
@@ -111,11 +117,11 @@ fn added_notnull_default_column_detected() {
     let mut actual = empty_snapshot();
 
     actual.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table("foo", vec![make_column("id", "TEXT", true, None, 1)]),
     );
     desired.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table(
             "foo",
             vec![
@@ -138,11 +144,11 @@ fn added_notnull_no_default_triggers_rebuild() {
     let mut actual = empty_snapshot();
 
     actual.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table("foo", vec![make_column("id", "TEXT", true, None, 1)]),
     );
     desired.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table(
             "foo",
             vec![
@@ -163,11 +169,11 @@ fn removed_column_triggers_rebuild() {
     let mut actual = empty_snapshot();
 
     desired.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table("foo", vec![make_column("id", "TEXT", true, None, 1)]),
     );
     actual.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table(
             "foo",
             vec![
@@ -187,11 +193,11 @@ fn changed_column_type_triggers_rebuild() {
     let mut actual = empty_snapshot();
 
     desired.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table("foo", vec![make_column("value", "INTEGER", false, None, 0)]),
     );
     actual.tables.insert(
-        "foo".to_string(),
+        ci("foo"),
         make_table("foo", vec![make_column("value", "TEXT", false, None, 0)]),
     );
 
@@ -201,27 +207,29 @@ fn changed_column_type_triggers_rebuild() {
 
 #[test]
 fn changed_index_detected() {
-    let desired = empty_snapshot();
-    let actual = empty_snapshot();
-    let mut desired = desired;
-    let mut actual = actual;
+    let mut desired = empty_snapshot();
+    let mut actual = empty_snapshot();
 
     desired.indexes.insert(
-        "idx_foo".to_string(),
+        ci("idx_foo"),
         IndexInfo {
             name: "idx_foo".to_string(),
             table_name: "foo".to_string(),
             sql: "CREATE INDEX idx_foo ON foo(a, b)".to_string(),
             is_fts: false,
+            is_unique: false,
+            columns: vec!["a".to_string(), "b".to_string()],
         },
     );
     actual.indexes.insert(
-        "idx_foo".to_string(),
+        ci("idx_foo"),
         IndexInfo {
             name: "idx_foo".to_string(),
             table_name: "foo".to_string(),
             sql: "CREATE INDEX idx_foo ON foo(a)".to_string(),
             is_fts: false,
+            is_unique: false,
+            columns: vec!["a".to_string()],
         },
     );
 
@@ -238,21 +246,25 @@ fn fts_index_change_uses_fts_fields() {
     let mut actual = empty_snapshot();
 
     desired.indexes.insert(
-        "idx_docs_fts".to_string(),
+        ci("idx_docs_fts"),
         IndexInfo {
             name: "idx_docs_fts".to_string(),
             table_name: "documents".to_string(),
             sql: "CREATE INDEX idx_docs_fts ON documents USING fts (title, body_text)".to_string(),
             is_fts: true,
+            is_unique: false,
+            columns: vec![],
         },
     );
     actual.indexes.insert(
-        "idx_docs_fts".to_string(),
+        ci("idx_docs_fts"),
         IndexInfo {
             name: "idx_docs_fts".to_string(),
             table_name: "documents".to_string(),
             sql: "CREATE INDEX idx_docs_fts ON documents USING fts (title)".to_string(),
             is_fts: true,
+            is_unique: false,
+            columns: vec![],
         },
     );
 
@@ -269,7 +281,7 @@ fn changed_view_detected() {
     let mut actual = empty_snapshot();
 
     desired.views.insert(
-        "v".to_string(),
+        ci("v"),
         ViewInfo {
             name: "v".to_string(),
             sql: "CREATE VIEW v AS SELECT 1, 2".to_string(),
@@ -277,7 +289,7 @@ fn changed_view_detected() {
         },
     );
     actual.views.insert(
-        "v".to_string(),
+        ci("v"),
         ViewInfo {
             name: "v".to_string(),
             sql: "CREATE VIEW v AS SELECT 1".to_string(),

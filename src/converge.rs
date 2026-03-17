@@ -1,13 +1,16 @@
 use std::path::Path;
 
-use crate::{MigrateError, SchemaSnapshot, compute_diff, execute_plan, generate_plan};
+use crate::diff::normalize_for_hash;
+use crate::schema::SchemaSnapshot;
+use crate::{MigrateError, compute_diff, execute_plan, generate_plan};
 
 pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), MigrateError> {
     if schema_sql.trim().is_empty() {
         return Err(MigrateError::Schema("empty schema SQL".into()));
     }
 
-    let schema_hash = blake3::hash(schema_sql.as_bytes()).to_hex().to_string();
+    let normalized = normalize_for_hash(schema_sql);
+    let schema_hash = blake3::hash(normalized.as_bytes()).to_hex().to_string();
 
     bootstrap_schema_meta(conn).await?;
 

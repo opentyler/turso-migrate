@@ -98,7 +98,7 @@ async fn to_sql_round_trips() {
     let tables1: Vec<_> = snap1
         .tables
         .keys()
-        .filter(|name| name.as_str() != "schema_version")
+        .filter(|name| name.raw() != "schema_version")
         .cloned()
         .collect();
     let tables2: Vec<_> = snap2.tables.keys().cloned().collect();

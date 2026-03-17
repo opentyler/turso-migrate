@@ -1,52 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::plan::referenced_tables;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SchemaSnapshot {
-    pub tables: BTreeMap<String, TableInfo>,
-    pub indexes: BTreeMap<String, IndexInfo>,
-    pub views: BTreeMap<String, ViewInfo>,
-    pub triggers: BTreeMap<String, TriggerInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableInfo {
-    pub name: String,
-    pub sql: String,
-    pub columns: Vec<ColumnInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColumnInfo {
-    pub name: String,
-    pub col_type: String,
-    pub notnull: bool,
-    pub default_value: Option<String>,
-    pub pk: i64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct IndexInfo {
-    pub name: String,
-    pub table_name: String,
-    pub sql: String,
-    pub is_fts: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ViewInfo {
-    pub name: String,
-    pub sql: String,
-    pub is_materialized: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TriggerInfo {
-    pub name: String,
-    pub table_name: String,
-    pub sql: String,
-}
+use crate::schema::{
+    CIString, Capabilities, ColumnInfo, ForeignKey, IndexInfo, SchemaSnapshot, TableInfo,
+    TriggerInfo, ViewInfo,
+};
 
 impl SchemaSnapshot {
     pub async fn from_connection(conn: &turso::Connection) -> Result<Self, turso::Error> {
@@ -57,32 +14,51 @@ impl SchemaSnapshot {
 
         let mut table_rows = conn
             .query(
-                "SELECT name, sql FROM sqlite_schema
-WHERE type = 'table'
-  AND name NOT LIKE 'sqlite_%'
-  AND name NOT IN ('_schema_meta', '_turso_migrations')
-ORDER BY name",
+                "SELECT name, sql FROM sqlite_schema \
+                 WHERE type = 'table' \
+                   AND name NOT LIKE 'sqlite_%' \
+                   AND name NOT IN ('_schema_meta', '_turso_migrations') \
+                 ORDER BY name",
                 (),
             )
             .await?;
 
         while let Some(row) = table_rows.next().await? {
             let name: String = row.get(0)?;
-            if is_internal_object(&name) || !is_safe_identifier(&name) {
+            if is_internal_object(&name) {
                 continue;
             }
             let sql: String = row.get(1)?;
-            let columns = table_columns(conn, &name).await?;
+            let mut columns = table_columns_xinfo(conn, &name).await?;
+            let mut foreign_keys = table_foreign_keys(conn, &name).await.unwrap_or_default();
+            if foreign_keys.is_empty() {
+                foreign_keys = parse_fk_references_from_sql(&sql);
+            }
+            let has_autoincrement = detect_autoincrement(&sql);
+            let is_strict = detect_strict(&sql);
+            let is_without_rowid = detect_without_rowid(&sql);
 
-            tables.insert(name.clone(), TableInfo { name, sql, columns });
+            enrich_columns_with_collation(&sql, &mut columns);
+
+            tables.insert(
+                CIString::new(&name),
+                TableInfo {
+                    name,
+                    sql,
+                    columns,
+                    foreign_keys,
+                    is_strict,
+                    is_without_rowid,
+                    has_autoincrement,
+                },
+            );
         }
 
         let mut index_rows = conn
             .query(
-                "SELECT name, tbl_name, sql FROM sqlite_schema
-WHERE type = 'index'
-  AND sql IS NOT NULL
-ORDER BY name",
+                "SELECT name, tbl_name, sql FROM sqlite_schema \
+                 WHERE type = 'index' AND sql IS NOT NULL \
+                 ORDER BY name",
                 (),
             )
             .await?;
@@ -97,24 +73,27 @@ ORDER BY name",
                 continue;
             }
             let sql: String = row.get(2)?;
-            let is_fts = sql.to_lowercase().contains("using fts");
+            let is_fts = sql.to_ascii_lowercase().contains("using fts");
+
+            let (is_unique, index_columns) =
+                index_details(conn, &name).await.unwrap_or((false, vec![]));
 
             indexes.insert(
-                name.clone(),
+                CIString::new(&name),
                 IndexInfo {
                     name,
                     table_name,
                     sql,
                     is_fts,
+                    is_unique,
+                    columns: index_columns,
                 },
             );
         }
 
         let mut view_rows = conn
             .query(
-                "SELECT name, sql FROM sqlite_schema
-WHERE type = 'view'
-ORDER BY name",
+                "SELECT name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name",
                 (),
             )
             .await?;
@@ -125,10 +104,10 @@ ORDER BY name",
                 continue;
             }
             let sql: String = row.get(1)?;
-            let is_materialized = sql.to_lowercase().contains("materialized");
+            let is_materialized = sql.to_ascii_lowercase().contains("materialized");
 
             views.insert(
-                name.clone(),
+                CIString::new(&name),
                 ViewInfo {
                     name,
                     sql,
@@ -139,9 +118,8 @@ ORDER BY name",
 
         let mut trigger_rows = conn
             .query(
-                "SELECT name, tbl_name, sql FROM sqlite_schema
-WHERE type = 'trigger'
-ORDER BY name",
+                "SELECT name, tbl_name, sql FROM sqlite_schema \
+                 WHERE type = 'trigger' ORDER BY name",
                 (),
             )
             .await?;
@@ -158,7 +136,7 @@ ORDER BY name",
             let sql: String = row.get(2)?;
 
             triggers.insert(
-                name.clone(),
+                CIString::new(&name),
                 TriggerInfo {
                     name,
                     table_name,
@@ -189,42 +167,44 @@ ORDER BY name",
     pub fn to_sql(&self) -> String {
         let mut sql = String::new();
 
-        let mut remaining: BTreeSet<String> = self
+        let mut remaining: BTreeSet<CIString> = self
             .tables
             .keys()
-            .filter(|name| !is_meta_table(name))
+            .filter(|name| !is_meta_table(name.raw()))
             .cloned()
             .collect();
         let mut ordered_tables = Vec::new();
 
         while !remaining.is_empty() {
             let mut progressed = false;
-            let candidates: Vec<String> = remaining.iter().cloned().collect();
+            let candidates: Vec<CIString> = remaining.iter().cloned().collect();
 
-            for table in candidates {
+            for key in candidates {
                 let refs = self
                     .tables
-                    .get(&table)
-                    .map(|t| referenced_tables(&t.sql))
+                    .get(&key)
+                    .map(|t| t.referenced_tables())
                     .unwrap_or_default();
 
-                let ready = refs.into_iter().all(|r| !remaining.contains(&r));
+                let ready = refs
+                    .into_iter()
+                    .all(|r| !remaining.contains(&CIString::new(&r)));
 
                 if ready {
-                    remaining.remove(&table);
-                    ordered_tables.push(table);
+                    remaining.remove(&key);
+                    ordered_tables.push(key);
                     progressed = true;
                 }
             }
 
             if !progressed {
-                ordered_tables.extend(remaining.iter().cloned());
+                ordered_tables.extend(remaining.into_iter());
                 break;
             }
         }
 
-        for table_name in ordered_tables {
-            if let Some(table) = self.tables.get(&table_name) {
+        for key in &ordered_tables {
+            if let Some(table) = self.tables.get(key) {
                 sql.push_str(&table.sql);
                 sql.push_str(";\n\n");
             }
@@ -254,27 +234,93 @@ ORDER BY name",
     }
 }
 
+impl Capabilities {
+    pub async fn detect(conn: &turso::Connection) -> Result<Self, turso::Error> {
+        let mut rows = conn.query("SELECT sqlite_version()", ()).await?;
+        let version_str: String = if let Some(row) = rows.next().await? {
+            row.get(0)?
+        } else {
+            "3.0.0".to_string()
+        };
+
+        let (major, minor, patch) = parse_version(&version_str);
+
+        Ok(Self {
+            sqlite_version: (major, minor, patch),
+            supports_drop_column: (major, minor, patch) >= (3, 35, 0),
+            supports_rename_column: (major, minor, patch) >= (3, 25, 0),
+            has_fts_module: true,
+            has_vector_module: true,
+            has_materialized_views: true,
+        })
+    }
+}
+
+fn parse_version(s: &str) -> (u32, u32, u32) {
+    let parts: Vec<u32> = s
+        .split('.')
+        .filter_map(|p| p.split('-').next()?.parse().ok())
+        .collect();
+    (
+        parts.first().copied().unwrap_or(3),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    )
+}
+
 fn is_meta_table(name: &str) -> bool {
-    name == "_schema_meta" || name == "_turso_migrations" || name == "schema_version"
+    let lower = name.to_ascii_lowercase();
+    lower == "_schema_meta" || lower == "_turso_migrations" || lower == "schema_version"
 }
 
 fn is_internal_object(name: &str) -> bool {
-    name.starts_with("sqlite_")
-        || name.starts_with("fts_dir_")
-        || name.starts_with("__turso_internal")
-        || name.starts_with("sqlite_autoindex_")
-        || name == "_schema_meta"
-        || name == "_turso_migrations"
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("sqlite_")
+        || lower.starts_with("fts_dir_")
+        || lower.starts_with("__turso_internal")
+        || lower.starts_with("sqlite_autoindex_")
+        || lower == "_schema_meta"
+        || lower == "_turso_migrations"
+        || lower.starts_with("_converge_new_")
 }
 
-fn is_safe_identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+async fn table_columns_xinfo(
+    conn: &turso::Connection,
+    table_name: &str,
+) -> Result<Vec<ColumnInfo>, turso::Error> {
+    let xinfo_pragma = format!("PRAGMA table_xinfo('{table_name}')");
+    match conn.query(&xinfo_pragma, ()).await {
+        Ok(mut rows) => {
+            let mut columns = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let name: String = row.get(1)?;
+                let col_type: String = row.get(2)?;
+                let notnull: i64 = row.get(3)?;
+                let default_value: Option<String> = row.get(4)?;
+                let pk: i64 = row.get(5)?;
+                let hidden: i64 = row.get(6).unwrap_or(0);
+
+                let is_generated = hidden == 2 || hidden == 3;
+                let is_hidden = hidden == 1;
+
+                columns.push(ColumnInfo {
+                    name,
+                    col_type,
+                    notnull: notnull != 0,
+                    default_value,
+                    pk,
+                    collation: None,
+                    is_generated,
+                    is_hidden,
+                });
+            }
+            Ok(columns)
+        }
+        Err(_) => table_columns_fallback(conn, table_name).await,
+    }
 }
 
-async fn table_columns(
+async fn table_columns_fallback(
     conn: &turso::Connection,
     table_name: &str,
 ) -> Result<Vec<ColumnInfo>, turso::Error> {
@@ -295,8 +341,188 @@ async fn table_columns(
             notnull: notnull != 0,
             default_value,
             pk,
+            collation: None,
+            is_generated: false,
+            is_hidden: false,
         });
     }
 
     Ok(columns)
+}
+
+async fn table_foreign_keys(
+    conn: &turso::Connection,
+    table_name: &str,
+) -> Result<Vec<ForeignKey>, turso::Error> {
+    let pragma = format!("PRAGMA foreign_key_list('{table_name}')");
+    let mut rows = conn.query(&pragma, ()).await?;
+
+    let mut fk_map: BTreeMap<i64, ForeignKey> = BTreeMap::new();
+
+    while let Some(row) = rows.next().await? {
+        let id: i64 = row.get(0)?;
+        let _seq: i64 = row.get(1)?;
+        let to_table: String = row.get(2)?;
+        let from_col: String = row.get(3)?;
+        let to_col: String = row.get(4)?;
+        let on_update: String = row.get(5).unwrap_or_else(|_| "NO ACTION".to_string());
+        let on_delete: String = row.get(6).unwrap_or_else(|_| "NO ACTION".to_string());
+
+        fk_map
+            .entry(id)
+            .and_modify(|fk| {
+                fk.from_columns.push(from_col.clone());
+                fk.to_columns.push(to_col.clone());
+            })
+            .or_insert_with(|| ForeignKey {
+                from_columns: vec![from_col],
+                to_table,
+                to_columns: vec![to_col],
+                on_delete,
+                on_update,
+            });
+    }
+
+    Ok(fk_map.into_values().collect())
+}
+
+async fn index_details(
+    conn: &turso::Connection,
+    index_name: &str,
+) -> Result<(bool, Vec<String>), turso::Error> {
+    let pragma = format!("PRAGMA index_info('{}')", index_name.replace('\'', "''"));
+    let mut rows = conn.query(&pragma, ()).await?;
+    let mut columns = Vec::new();
+
+    while let Some(row) = rows.next().await? {
+        let col_name: String = row.get(2)?;
+        columns.push(col_name);
+    }
+
+    let pragma2 = format!("PRAGMA index_list('{}')", index_name.replace('\'', "''"));
+    let mut list_rows = conn.query(&pragma2, ()).await;
+    let is_unique = match &mut list_rows {
+        Ok(rows) => {
+            let mut found = false;
+            while let Ok(Some(row)) = rows.next().await {
+                let name: String = row.get(1).unwrap_or_default();
+                if name == index_name {
+                    let u: i64 = row.get(2).unwrap_or(0);
+                    found = u != 0;
+                    break;
+                }
+            }
+            found
+        }
+        Err(_) => false,
+    };
+
+    Ok((is_unique, columns))
+}
+
+fn parse_fk_references_from_sql(table_sql: &str) -> Vec<ForeignKey> {
+    let mut refs = Vec::new();
+    let bytes = table_sql.as_bytes();
+    let lower = table_sql.to_lowercase();
+    let lower_bytes = lower.as_bytes();
+    let mut idx = 0;
+
+    while idx < lower_bytes.len() {
+        if lower_bytes[idx..].starts_with(b"references") {
+            idx += "references".len();
+            while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                idx += 1;
+            }
+            if idx >= bytes.len() {
+                break;
+            }
+
+            let name = if bytes[idx] == b'"' {
+                idx += 1;
+                let start = idx;
+                while idx < bytes.len() && bytes[idx] != b'"' {
+                    idx += 1;
+                }
+                let val = table_sql[start..idx].to_string();
+                if idx < bytes.len() {
+                    idx += 1;
+                }
+                val
+            } else {
+                let start = idx;
+                while idx < bytes.len() {
+                    let ch = bytes[idx] as char;
+                    if ch.is_ascii_alphanumeric() || ch == '_' {
+                        idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+                table_sql[start..idx].to_string()
+            };
+
+            if !name.is_empty() {
+                refs.push(ForeignKey {
+                    from_columns: vec![],
+                    to_table: name,
+                    to_columns: vec![],
+                    on_delete: "NO ACTION".to_string(),
+                    on_update: "NO ACTION".to_string(),
+                });
+            }
+        } else {
+            idx += 1;
+        }
+    }
+
+    refs
+}
+
+fn detect_autoincrement(create_sql: &str) -> bool {
+    create_sql.to_ascii_lowercase().contains("autoincrement")
+}
+
+fn detect_strict(create_sql: &str) -> bool {
+    let lower = create_sql.trim().to_ascii_lowercase();
+    lower.ends_with(") strict")
+        || lower.ends_with(") strict;")
+        || lower.ends_with(")strict")
+        || lower.ends_with(")strict;")
+        || lower.contains(") strict,")
+}
+
+fn detect_without_rowid(create_sql: &str) -> bool {
+    create_sql.to_ascii_lowercase().contains("without rowid")
+}
+
+fn enrich_columns_with_collation(create_sql: &str, columns: &mut [ColumnInfo]) {
+    let lower = create_sql.to_ascii_lowercase();
+
+    for col in columns.iter_mut() {
+        let col_lower = col.name.to_ascii_lowercase();
+        let search_quoted = format!("\"{}\"", col_lower);
+
+        let relevant_section = find_column_section(&lower, &search_quoted)
+            .or_else(|| find_column_section(&lower, &col_lower));
+
+        if let Some(section) = relevant_section {
+            if let Some(pos) = section.find("collate") {
+                let after = section[pos + "collate".len()..].trim_start();
+                let collation: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !collation.is_empty() {
+                    col.collation = Some(collation.to_ascii_uppercase());
+                }
+            }
+        }
+    }
+}
+
+fn find_column_section(lower_sql: &str, col_pattern: &str) -> Option<String> {
+    let pos = lower_sql.find(col_pattern)?;
+    let after = &lower_sql[pos..];
+    let end = after.find(',').or_else(|| after.find(')'))?;
+    Some(after[..end].to_string())
 }

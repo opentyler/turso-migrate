@@ -83,7 +83,7 @@ async fn add_column_execution() {
     execute_plan(&conn, &plan).await.unwrap();
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
-    let foo = after.tables.get("foo").unwrap();
+    let foo = after.get_table("foo").unwrap();
     assert!(foo.columns.iter().any(|c| c.name == "extra"));
 }
 
@@ -124,7 +124,7 @@ async fn table_rebuild_preserves_data() {
     assert_eq!(row2.get::<String>(1).unwrap(), "bob");
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
-    let foo = after.tables.get("foo").unwrap();
+    let foo = after.get_table("foo").unwrap();
     assert!(!foo.columns.iter().any(|c| c.name == "legacy"));
 }
 
@@ -186,7 +186,7 @@ async fn add_notnull_default_column_execution() {
     execute_plan(&conn, &plan).await.unwrap();
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
-    let foo = after.tables.get("foo").unwrap();
+    let foo = after.get_table("foo").unwrap();
     assert!(foo.columns.iter().any(|c| c.name == "status"));
 }
 
@@ -295,13 +295,12 @@ async fn materialized_view_recreated_after_table_change() {
 
     let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert!(
-        after.views.contains_key("mv_counts"),
+        after.has_view("mv_counts"),
         "Materialized view should be recreated"
     );
     assert!(
         !after
-            .tables
-            .get("items")
+            .get_table("items")
             .unwrap()
             .columns
             .iter()

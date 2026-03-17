@@ -1,3 +1,4 @@
+use turso_migrate::diff::normalize_for_hash;
 use turso_migrate::{SchemaSnapshot, converge, schema_version};
 
 fn test_schema() -> &'static str {
@@ -34,7 +35,8 @@ async fn converge_fresh_db() {
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert_eq!(snap.tables.len(), 10);
 
-    let expected_hash = blake3::hash(test_schema().as_bytes()).to_hex().to_string();
+    let normalized = normalize_for_hash(test_schema());
+    let expected_hash = blake3::hash(normalized.as_bytes()).to_hex().to_string();
     let hash = get_meta(&conn, "schema_hash").await;
     assert_eq!(hash.as_deref(), Some(expected_hash.as_str()));
 }
@@ -102,7 +104,8 @@ async fn fast_path_skips_diff() {
     converge(&conn, test_schema()).await.unwrap();
     converge(&conn, test_schema()).await.unwrap();
 
-    let expected_hash = blake3::hash(test_schema().as_bytes()).to_hex().to_string();
+    let normalized = normalize_for_hash(test_schema());
+    let expected_hash = blake3::hash(normalized.as_bytes()).to_hex().to_string();
     let hash = get_meta(&conn, "schema_hash").await;
     assert_eq!(hash.as_deref(), Some(expected_hash.as_str()));
 }
@@ -165,7 +168,8 @@ async fn hash_mismatch_triggers_convergence() {
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert_eq!(snap.tables.len(), 10);
 
-    let expected_hash = blake3::hash(test_schema().as_bytes()).to_hex().to_string();
+    let normalized = normalize_for_hash(test_schema());
+    let expected_hash = blake3::hash(normalized.as_bytes()).to_hex().to_string();
     let hash = get_meta(&conn, "schema_hash").await;
     assert_eq!(hash.as_deref(), Some(expected_hash.as_str()));
 }
