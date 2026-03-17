@@ -494,3 +494,34 @@ async fn data_migrations_apply_once() {
     let count2: i64 = row2.get(0).unwrap();
     assert_eq!(count2, 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_migrations_run_even_when_schema_hash_matches() {
+    let (_db, conn) = empty_db().await;
+    let schema = "CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL);";
+
+    converge(&conn, schema).await.unwrap();
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        data_migrations: vec![DataMigration {
+            id: "seed-after-hash".to_string(),
+            statements: vec!["INSERT INTO users (id, name) VALUES ('u3', 'charlie')".to_string()],
+        }],
+        ..Default::default()
+    };
+
+    let report = converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap();
+    assert_eq!(report.mode, ConvergeMode::SlowPath);
+    assert_eq!(report.data_migrations_applied, 1);
+
+    let mut rows = conn
+        .query("SELECT name FROM users WHERE id = 'u3'", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let name: String = row.get(0).unwrap();
+    assert_eq!(name, "charlie");
+}

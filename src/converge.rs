@@ -47,13 +47,22 @@ pub async fn converge_with_options(
     let in_progress = get_meta(conn, "migration_in_progress").await?;
 
     let is_crash_recovery = in_progress.as_deref() == Some("1");
+    let has_pending_data_migrations =
+        pending_data_migrations(conn, &options.data_migrations).await?;
 
     if stored_hash.as_deref() == Some(schema_hash.as_str()) && !is_crash_recovery {
-        if !detect_drift(conn).await? {
+        if !has_pending_data_migrations && !detect_drift(conn).await? {
             tracing::debug!(hash = %schema_hash, "converge: fast-path, schema unchanged");
             return Ok(ConvergeReport::fast_path(start.elapsed()));
         }
-        tracing::warn!("converge: schema drift detected, forcing slow-path");
+        if has_pending_data_migrations {
+            tracing::info!(
+                pending = options.data_migrations.len(),
+                "converge: pending data migrations, forcing execution path"
+            );
+        } else {
+            tracing::warn!("converge: schema drift detected, forcing slow-path");
+        }
     }
 
     if is_crash_recovery {
@@ -178,7 +187,7 @@ async fn run_slow_path(
 
     let mode = if is_crash_recovery {
         ConvergeMode::CrashRecovery
-    } else if had_ddl {
+    } else if had_ddl || data_migrations_applied > 0 {
         ConvergeMode::SlowPath
     } else {
         ConvergeMode::NoOp
@@ -675,4 +684,22 @@ async fn apply_data_migrations(
     }
 
     Ok(applied)
+}
+
+async fn pending_data_migrations(
+    conn: &turso::Connection,
+    migrations: &[DataMigration],
+) -> Result<bool, MigrateError> {
+    for migration in migrations {
+        if migration.id.trim().is_empty() {
+            return Err(MigrateError::Schema(
+                "data migration id must not be empty".to_string(),
+            ));
+        }
+        let key = format!("data_migration:{}", migration.id);
+        if get_meta(conn, &key).await?.is_none() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

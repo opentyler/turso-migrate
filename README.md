@@ -469,7 +469,7 @@ This means:
 cargo test
 ```
 
-97 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
+98 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
 
 ## CLI
 
@@ -493,7 +493,7 @@ turso-migrate is a Rust implementation of the approach described in David Rothli
 | FTS indexes | N/A | Turso tantivy FTS with 3-phase execution |
 | Vector columns | N/A | `vector32(N)` diffed and preserved |
 | Change detection | Always full introspection | BLAKE3 hash + drift detection (<1ms) |
-| Crash recovery | None | `migration_in_progress` flag + temp table cleanup |
+| Crash recovery | None | `migration_in_progress` flag + phase cursor + internal temp table filtering |
 | FK handling | Basic | PRAGMA-based detection, deferred checks, post-rebuild validation |
 | Introspection | `PRAGMA table_info` | `PRAGMA table_xinfo` + `index_list` + `foreign_key_list` |
 | Schema model | Basic columns | COLLATE, GENERATED, UNIQUE, STRICT, WITHOUT ROWID, AUTOINCREMENT |
