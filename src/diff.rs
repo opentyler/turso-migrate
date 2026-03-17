@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::schema::{ColumnInfo, SchemaSnapshot};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +32,51 @@ impl SchemaDiff {
             && self.views_to_drop.is_empty()
             && self.triggers_to_create.is_empty()
             && self.triggers_to_drop.is_empty()
+    }
+}
+
+impl fmt::Display for SchemaDiff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return write!(f, "(no changes)");
+        }
+        for t in &self.tables_to_create {
+            writeln!(f, "+ TABLE {t}")?;
+        }
+        for t in &self.tables_to_drop {
+            writeln!(f, "- TABLE {t}")?;
+        }
+        for t in &self.tables_to_rebuild {
+            writeln!(f, "~ TABLE {t}: REBUILD")?;
+        }
+        for (t, col) in &self.columns_to_add {
+            writeln!(f, "+ COLUMN {t}.{} {}", col.name, col.col_type)?;
+        }
+        for i in &self.indexes_to_create {
+            writeln!(f, "+ INDEX {i}")?;
+        }
+        for i in &self.indexes_to_drop {
+            writeln!(f, "- INDEX {i}")?;
+        }
+        for i in &self.fts_indexes_to_create {
+            writeln!(f, "+ FTS INDEX {i}")?;
+        }
+        for i in &self.fts_indexes_to_drop {
+            writeln!(f, "- FTS INDEX {i}")?;
+        }
+        for v in &self.views_to_create {
+            writeln!(f, "+ VIEW {v}")?;
+        }
+        for v in &self.views_to_drop {
+            writeln!(f, "- VIEW {v}")?;
+        }
+        for t in &self.triggers_to_create {
+            writeln!(f, "+ TRIGGER {t}")?;
+        }
+        for t in &self.triggers_to_drop {
+            writeln!(f, "- TRIGGER {t}")?;
+        }
+        Ok(())
     }
 }
 

@@ -331,3 +331,97 @@ async fn pristine_vs_empty_produces_full_create() {
     assert!(diff.views_to_drop.is_empty());
     assert!(diff.triggers_to_drop.is_empty());
 }
+
+#[test]
+fn case_insensitive_type_comparison_no_rebuild() {
+    let mut desired = empty_snapshot();
+    let mut actual = empty_snapshot();
+
+    desired.tables.insert(
+        ci("foo"),
+        make_table("foo", vec![make_column("val", "INTEGER", false, None, 0)]),
+    );
+    actual.tables.insert(
+        ci("foo"),
+        make_table("foo", vec![make_column("val", "integer", false, None, 0)]),
+    );
+
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        diff.is_empty(),
+        "Case difference in type should not trigger rebuild: {diff}"
+    );
+}
+
+#[test]
+fn display_impl_shows_changes() {
+    let mut desired = empty_snapshot();
+    desired.tables.insert(ci("foo"), make_table("foo", vec![]));
+    let actual = empty_snapshot();
+
+    let diff = compute_diff(&desired, &actual);
+    let output = diff.to_string();
+    assert!(
+        output.contains("+ TABLE foo"),
+        "Display should show created table: {output}"
+    );
+}
+
+#[test]
+fn display_empty_diff() {
+    let snap = empty_snapshot();
+    let diff = compute_diff(&snap, &snap);
+    assert_eq!(diff.to_string(), "(no changes)");
+}
+
+#[test]
+fn normalize_preserves_string_literal_case() {
+    use turso_migrate::diff::normalize_for_hash;
+    let sql = "SELECT * FROM t WHERE status = 'Active'";
+    let normalized = normalize_for_hash(sql);
+    assert!(
+        normalized.contains("'Active'"),
+        "String literal case should be preserved: {normalized}"
+    );
+    assert!(
+        normalized.contains("select"),
+        "Keywords should be lowercased: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_strips_comments() {
+    use turso_migrate::diff::normalize_for_hash;
+    let sql = "CREATE TABLE foo ( -- this is a comment\n  id TEXT PRIMARY KEY\n)";
+    let normalized = normalize_for_hash(sql);
+    assert!(
+        !normalized.contains("comment"),
+        "Comments should be stripped: {normalized}"
+    );
+    assert!(
+        normalized.contains("id text primary key"),
+        "Content should remain: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_strips_block_comments() {
+    use turso_migrate::diff::normalize_for_hash;
+    let sql = "CREATE TABLE /* multi\nline\ncomment */ foo (id TEXT)";
+    let normalized = normalize_for_hash(sql);
+    assert!(
+        !normalized.contains("multi"),
+        "Block comments should be stripped: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_handles_escaped_quotes() {
+    use turso_migrate::diff::normalize_for_hash;
+    let sql = "INSERT INTO t VALUES ('it''s a test')";
+    let normalized = normalize_for_hash(sql);
+    assert!(
+        normalized.contains("'it''s a test'"),
+        "Escaped quotes should be preserved: {normalized}"
+    );
+}

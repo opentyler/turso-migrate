@@ -122,6 +122,9 @@ pub fn generate_plan(
     }
 
     for table_name in &diff.tables_to_drop {
+        if is_protected_table(table_name) {
+            continue;
+        }
         transactional_stmts.push(format!("DROP TABLE IF EXISTS {}", quote_ident(table_name)));
     }
 
@@ -473,6 +476,16 @@ fn rewrite_create_table_name(create_sql: &str, temp_table_name: &str) -> String 
 
 pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn is_protected_table(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "_schema_meta"
+        || lower.starts_with("_converge_new_")
+        || lower.starts_with("sqlite_")
+        || lower.starts_with("fts_dir_")
+        || lower.starts_with("__turso_internal")
+        || lower == "_turso_migrations"
 }
 
 fn view_depends_on_table(view_sql: &str, table_name: &str) -> bool {
