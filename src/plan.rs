@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use crate::diff::SchemaDiff;
+use crate::error::MigrateError;
 use crate::schema::{ColumnInfo, SchemaSnapshot};
 
 #[derive(Debug, Clone)]
@@ -26,7 +27,7 @@ pub fn generate_plan(
     diff: &SchemaDiff,
     desired: &SchemaSnapshot,
     actual: &SchemaSnapshot,
-) -> MigrationPlan {
+) -> Result<MigrationPlan, MigrateError> {
     let rebuilt_tables: BTreeSet<String> = diff.tables_to_rebuild.iter().cloned().collect();
     let rebuilt_lower: HashSet<String> = rebuilt_tables
         .iter()
@@ -139,7 +140,19 @@ pub fn generate_plan(
         if let (Some(desired_table), Some(actual_table)) =
             (desired.get_table(table_name), actual.get_table(table_name))
         {
+            validate_rebuild_safety(table_name, desired_table, actual_table)?;
+
             let temp_table_name = format!("_converge_new_{table_name}");
+
+            if actual_table.has_autoincrement {
+                transactional_stmts.push(format!(
+                    "INSERT OR REPLACE INTO _schema_meta (key, value) \
+                     SELECT 'autoincrement_seq_{}', seq FROM sqlite_sequence WHERE name = '{}'",
+                    table_name.replace('\'', "''"),
+                    table_name.replace('\'', "''")
+                ));
+            }
+
             transactional_stmts.push(rewrite_create_table_name(
                 &desired_table.sql,
                 &temp_table_name,
@@ -156,6 +169,20 @@ pub fn generate_plan(
                 quote_ident(&temp_table_name),
                 quote_ident(table_name)
             ));
+
+            if desired_table.has_autoincrement {
+                transactional_stmts.push(format!(
+                    "INSERT OR REPLACE INTO sqlite_sequence (name, seq) \
+                     SELECT '{}', CAST(value AS INTEGER) FROM _schema_meta \
+                     WHERE key = 'autoincrement_seq_{}'",
+                    table_name.replace('\'', "''"),
+                    table_name.replace('\'', "''")
+                ));
+                transactional_stmts.push(format!(
+                    "DELETE FROM _schema_meta WHERE key = 'autoincrement_seq_{}'",
+                    table_name.replace('\'', "''")
+                ));
+            }
         }
     }
 
@@ -210,7 +237,7 @@ pub fn generate_plan(
         .cloned()
         .collect();
 
-    MigrationPlan {
+    Ok(MigrationPlan {
         new_tables: ordered_new_tables,
         altered_tables: altered_tables.into_iter().collect(),
         rebuilt_tables: rebuilt_tables.into_iter().collect(),
@@ -220,7 +247,7 @@ pub fn generate_plan(
         changed_views: changed_views.into_iter().collect(),
         transactional_stmts,
         non_transactional_stmts,
-    }
+    })
 }
 
 fn order_new_tables(
@@ -307,6 +334,34 @@ fn order_view_creation(
     }
 
     ordered
+}
+
+fn validate_rebuild_safety(
+    table_name: &str,
+    desired: &crate::schema::TableInfo,
+    actual: &crate::schema::TableInfo,
+) -> Result<(), MigrateError> {
+    let actual_cols: HashSet<String> = actual
+        .columns
+        .iter()
+        .map(|c| c.name.to_ascii_lowercase())
+        .collect();
+
+    for col in &desired.columns {
+        if col.is_generated || col.is_hidden {
+            continue;
+        }
+        let is_new = !actual_cols.contains(&col.name.to_ascii_lowercase());
+        if is_new && col.notnull && col.default_value.is_none() {
+            return Err(MigrateError::Schema(format!(
+                "Table '{}' rebuild would add NOT NULL column '{}' without DEFAULT. \
+                 Existing rows would violate the constraint. \
+                 Add a DEFAULT value to the column definition.",
+                table_name, col.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn build_add_column_stmt(table_name: &str, col: &ColumnInfo) -> String {

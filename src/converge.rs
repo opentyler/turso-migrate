@@ -29,7 +29,7 @@ pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), 
     let diff = compute_diff(&desired, &actual);
     let had_ddl = !diff.is_empty();
     if had_ddl {
-        let plan = generate_plan(&diff, &desired, &actual);
+        let plan = generate_plan(&diff, &desired, &actual)?;
         execute_plan(conn, &plan).await?;
     }
 

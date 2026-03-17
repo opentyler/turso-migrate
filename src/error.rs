@@ -9,8 +9,12 @@ pub enum MigrateError {
     },
     #[error("migration statement failed: {stmt}; cause: {source}")]
     Statement { stmt: String, source: turso::Error },
-    #[error("foreign key violations after migration: {0:?}")]
-    ForeignKeyViolation(Vec<String>),
+    #[error("foreign key violation: table={table}, rowid={rowid}, references={parent}")]
+    ForeignKeyViolation {
+        table: String,
+        rowid: i64,
+        parent: String,
+    },
     #[error("schema error: {0}")]
     Schema(String),
 }

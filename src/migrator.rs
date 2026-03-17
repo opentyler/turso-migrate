@@ -34,7 +34,7 @@ impl Migrator {
         let desired = SchemaSnapshot::from_schema_sql(&self.schema_sql).await?;
         let actual = SchemaSnapshot::from_connection(conn).await?;
         let diff = crate::compute_diff(&desired, &actual);
-        Ok(crate::generate_plan(&diff, &desired, &actual))
+        crate::generate_plan(&diff, &desired, &actual)
     }
 
     pub async fn migrate(&self, conn: &turso::Connection) -> Result<MigrationPlan, MigrateError> {
@@ -50,7 +50,7 @@ impl Migrator {
             diff.tables_to_drop.clear();
         }
 
-        let plan = crate::generate_plan(&diff, &desired, &actual);
+        let plan = crate::generate_plan(&diff, &desired, &actual)?;
         if !plan.is_empty() {
             crate::execute_plan(conn, &plan).await?;
         }
