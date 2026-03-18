@@ -135,7 +135,7 @@ use turso_converge::ConvergeOptions;
 let options = ConvergeOptions {
     policy: ConvergePolicy::default(),      // Safe: blocks destructive changes
     dry_run: false,                         // Set true to preview without executing
-    busy_timeout: Duration::from_secs(5),   // PRAGMA busy_timeout for SQLITE_BUSY
+    busy_timeout: Duration::from_secs(5),   // PRAGMA busy_timeout
     max_retries: 3,
     backup_before_destructive: None,        // Optional file/dir path for pre-DDL SQL backup
     data_migrations: vec![],                // Optional idempotent data migration steps
@@ -145,7 +145,7 @@ let options = ConvergeOptions {
 };
 ```
 
-The `busy_timeout` is applied as `PRAGMA busy_timeout` before executing the migration plan. This prevents `SQLITE_BUSY` errors when another connection holds a write lock.
+The `busy_timeout` is applied as `PRAGMA busy_timeout` before executing the migration plan. This prevents busy errors when another connection holds a write lock.
 
 ### `ConvergeReport` — What Happened
 
@@ -345,7 +345,7 @@ Internal tables (`_schema_meta`, `_converge_new_*`, `_cap_probe_*`, `sqlite_*`, 
 Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT counters aren't reset.
 
 ### Busy Timeout
-`PRAGMA busy_timeout` is set before migration execution (configurable via `ConvergeOptions.busy_timeout`, default 5 seconds). This prevents `SQLITE_BUSY` errors when another connection holds a write lock.
+`PRAGMA busy_timeout` is set before migration execution (configurable via `ConvergeOptions.busy_timeout`, default 5 seconds). This prevents busy errors when another connection holds a write lock.
 
 ## Supported Features
 
@@ -400,13 +400,13 @@ turso-converge uses a rich internal schema representation:
 - **`ViewInfo`** — Name, SQL, materialized view flag
 - **`TriggerInfo`** — Name, attached table, SQL
 - **`ForeignKey`** — From/to columns, referenced table, ON DELETE/UPDATE actions
-- **`Capabilities`** — Detected SQLite version and available features
+- **`Capabilities`** — Detected database version and available features
 
 ## The 12-Step ALTER TABLE Procedure
 
-SQLite has limited native ALTER TABLE support. For changes beyond ADD/DROP COLUMN, SQLite prescribes a [12-step procedure](https://www.sqlite.org/lang_altertable.html#otheralter). turso-converge follows it with safety enhancements:
+Turso has limited native ALTER TABLE support. For changes beyond ADD/DROP COLUMN, the [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) is prescribed. turso-converge follows it with safety enhancements:
 
-| SQLite Step | turso-converge | Safety Enhancement |
+| Step | turso-converge | Safety Enhancement |
 |-------------|---------------|-------------------|
 | 1. Disable FK constraints | `PRAGMA defer_foreign_keys = ON` | Defers rather than disables — violations still caught |
 | 2. Begin transaction | `BEGIN IMMEDIATE` | Write lock prevents concurrent migration |
@@ -466,7 +466,7 @@ This means:
 
 **FTS + triggers require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`.
 
-**WITHOUT ROWID and GENERATED columns are not supported by Turso/libSQL** (as of 3.50.4). turso-converge includes introspection support for future compatibility, but these features will fail at the Turso parser level.
+**WITHOUT ROWID and GENERATED columns are not supported by Turso** (as of 3.50.4). turso-converge includes introspection support for future compatibility, but these features will fail at the Turso parser level.
 
 ## Running Tests
 

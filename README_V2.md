@@ -278,7 +278,7 @@ turso-converge is designed to be safe by default:
 | **Atomic state** | Hash + version + flags updated in a single transaction |
 | **Protected namespace** | `_schema_meta`, `_converge_new_*`, `sqlite_*`, etc. never dropped |
 | **AUTOINCREMENT preservation** | `sqlite_sequence` values saved and restored across rebuilds |
-| **Busy timeout** | `PRAGMA busy_timeout` (default 5s) prevents `SQLITE_BUSY` errors |
+| **Busy timeout** | `PRAGMA busy_timeout` (default 5s) prevents busy errors |
 | **Feature preflight** | Runtime probes detect FTS/vector/materialized view support before execution |
 | **Read-only guard** | `MigrateError::ReadOnly` returned immediately on replica connections |
 

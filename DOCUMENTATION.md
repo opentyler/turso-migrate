@@ -105,7 +105,7 @@
 
 ## Introduction
 
-turso-converge is a Rust library that provides **declarative schema convergence** for Turso (libSQL) databases. Instead of writing and maintaining numbered migration files (`001_up.sql`, `002_up.sql`, ...), you define your desired schema in a single SQL file and turso-converge automatically diffs the live database against your desired schema, generates a migration plan, and executes it.
+turso-converge is a Rust library that provides **declarative schema convergence** for Turso databases. Instead of writing and maintaining numbered migration files (`001_up.sql`, `002_up.sql`, ...), you define your desired schema in a single SQL file and turso-converge automatically diffs the live database against your desired schema, generates a migration plan, and executes it.
 
 A BLAKE3 hash fast-path makes subsequent checks near-instant (sub-millisecond) when the schema hasn't changed.
 
@@ -141,7 +141,7 @@ tokio = { version = "1", features = ["full"] }
 | Rust edition | 2024 |
 | Minimum Rust version | 1.85+ |
 | Async runtime | Tokio (multi-thread flavor) |
-| Database | Turso / libSQL |
+| Database | Turso |
 
 **Optional Turso builder flags** (required for FTS, materialized views, and triggers):
 
@@ -557,7 +557,7 @@ pub struct ConvergeOptions {
 |-------|------|---------|-------------|
 | `policy` | `ConvergePolicy` | `ConvergePolicy::default()` | Controls which destructive changes are allowed. |
 | `dry_run` | `bool` | `false` | If `true`, compute the plan but don't execute it. The plan SQL is returned in `ConvergeReport.plan_sql`. |
-| `busy_timeout` | `Duration` | `5 seconds` | Applied as `PRAGMA busy_timeout` before executing the migration plan. Prevents `SQLITE_BUSY` errors. |
+| `busy_timeout` | `Duration` | `5 seconds` | Applied as `PRAGMA busy_timeout` before executing the migration plan. Prevents busy errors. |
 | `max_retries` | `u32` | `3` | Maximum number of retries for transient failures. |
 | `backup_before_destructive` | `Option<PathBuf>` | `None` | If set and destructive changes are detected, writes the current schema DDL to this path before executing. If the path is a directory, creates a timestamped file inside it. |
 | `data_migrations` | `Vec<DataMigration>` | `vec![]` | Idempotent post-DDL data migration steps. Each is tracked by ID in `_schema_meta`. |
@@ -801,7 +801,7 @@ pub struct SchemaSnapshot {
 }
 ```
 
-All maps use `CIString` keys for case-insensitive lookup (matching SQLite's identifier semantics).
+All maps use `CIString` keys for case-insensitive lookup (matching Turso's case-insensitive identifier semantics).
 
 **Construction methods** (in [`src/introspect.rs`](src/introspect.rs)):
 
@@ -850,7 +850,7 @@ pub struct TableInfo {
 
 | Field | Description |
 |-------|-------------|
-| `name` | Table name as it appears in `sqlite_schema`. |
+| `name` | Table name as it appears in the system catalog (`sqlite_schema`). |
 | `sql` | The full `CREATE TABLE` DDL statement. |
 | `columns` | Column metadata from `PRAGMA table_xinfo`. |
 | `foreign_keys` | Foreign key constraints from `PRAGMA foreign_key_list` (with SQL-based fallback). |
@@ -913,7 +913,7 @@ pub struct IndexInfo {
 
 | Field | Description |
 |-------|-------------|
-| `name` | Index name from `sqlite_schema`. |
+| `name` | Index name from the system catalog (`sqlite_schema`). |
 | `table_name` | Name of the table this index belongs to. |
 | `sql` | The full `CREATE INDEX` DDL. |
 | `is_fts` | `true` if the index SQL contains `USING fts` (Turso's tantivy FTS). |
@@ -936,7 +936,7 @@ pub struct ViewInfo {
 
 | Field | Description |
 |-------|-------------|
-| `name` | View name from `sqlite_schema`. |
+| `name` | View name from the system catalog (`sqlite_schema`). |
 | `sql` | The full `CREATE VIEW` or `CREATE MATERIALIZED VIEW` DDL. |
 | `is_materialized` | `true` if the DDL starts with `CREATE MATERIALIZED VIEW`. |
 
@@ -956,7 +956,7 @@ pub struct TriggerInfo {
 
 | Field | Description |
 |-------|-------------|
-| `name` | Trigger name from `sqlite_schema`. |
+| `name` | Trigger name from the system catalog (`sqlite_schema`). |
 | `table_name` | Name of the table this trigger is attached to. |
 | `sql` | The full `CREATE TRIGGER` DDL. |
 
@@ -982,13 +982,13 @@ Foreign keys are detected via `PRAGMA foreign_key_list`. If that returns no resu
 
 ### Capabilities
 
-Detected capabilities of the target SQLite/libSQL connection. Source: [`src/schema.rs:199-212`](src/schema.rs).
+Detected capabilities of the target Turso database connection. Source: [`src/schema.rs:199-212`](src/schema.rs).
 
 ```rust
 pub struct Capabilities {
-    pub sqlite_version: (u32, u32, u32),
-    pub supports_drop_column: bool,     // SQLite >= 3.35.0
-    pub supports_rename_column: bool,   // SQLite >= 3.25.0
+    pub database_version: (u32, u32, u32),
+    pub supports_drop_column: bool,     // Turso >= 3.35.0
+    pub supports_rename_column: bool,   // Turso >= 3.25.0
     pub has_fts_module: bool,
     pub has_vector_module: bool,
     pub has_materialized_views: bool,
@@ -999,7 +999,7 @@ Capabilities are detected via runtime probing (see [Capability Detection](#capab
 
 ```rust
 Capabilities {
-    sqlite_version: (3, 45, 0),
+    database_version: (3, 45, 0),
     supports_drop_column: true,
     supports_rename_column: true,
     has_fts_module: false,
@@ -1012,7 +1012,7 @@ Capabilities {
 
 ### CIString
 
-Case-insensitive string wrapper matching SQLite's identifier semantics. Source: [`src/schema.rs:16-19`](src/schema.rs).
+Case-insensitive string wrapper matching Turso's identifier semantics. Source: [`src/schema.rs:16-19`](src/schema.rs).
 
 ```rust
 pub struct CIString {
@@ -1207,9 +1207,9 @@ Views are similarly sorted: a view is created only after all views it depends on
 
 ### Table Rebuild Procedure
 
-turso-converge follows SQLite's [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) with safety enhancements:
+turso-converge follows the [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) with safety enhancements:
 
-| SQLite Step | turso-converge | Safety Enhancement |
+| Step | turso-converge | Safety Enhancement |
 |---|---|---|
 | 1. Disable FK constraints | `PRAGMA defer_foreign_keys = ON` | Defers rather than disables — violations are still caught at COMMIT |
 | 2. Begin transaction | `BEGIN IMMEDIATE` | Write lock prevents concurrent DDL |
@@ -1313,7 +1313,7 @@ The policy check runs after diff computation but before any DDL executes.
 
 ### NOT NULL Column Validation
 
-Adding a `NOT NULL` column without a `DEFAULT` value to an existing table is caught **before** any DDL executes. This applies both to `ADD COLUMN` (which SQLite itself would reject) and table rebuilds (where existing rows would violate the constraint).
+Adding a `NOT NULL` column without a `DEFAULT` value to an existing table is caught **before** any DDL executes. This applies both to `ADD COLUMN` (which Turso itself would reject) and table rebuilds (where existing rows would violate the constraint).
 
 The error message specifies which column on which table needs a default:
 ```
@@ -1392,7 +1392,7 @@ The migration planner never drops tables matching these patterns:
 |---------|-------------|
 | `_schema_meta` | turso-converge's internal state table |
 | `_converge_new_*` | Temporary tables from in-progress rebuilds |
-| `sqlite_*` | SQLite internal tables |
+| `sqlite_*` | Turso internal system tables |
 | `fts_dir_*` | Turso FTS internal tables |
 | `__turso_internal*` | Turso internal tables |
 
@@ -1419,7 +1419,7 @@ This prevents AUTOINCREMENT counters from being reset by table rebuilds.
 
 ### Busy Timeout
 
-`PRAGMA busy_timeout` is set before migration execution to the value specified in `ConvergeOptions.busy_timeout` (default: 5 seconds). This prevents `SQLITE_BUSY` errors when another connection holds a write lock.
+`PRAGMA busy_timeout` is set before migration execution to the value specified in `ConvergeOptions.busy_timeout` (default: 5 seconds). This prevents busy errors when another connection holds a write lock.
 
 Source: [`src/execute.rs:15-28`](src/execute.rs) (`set_busy_timeout`)
 
@@ -1609,7 +1609,7 @@ Database introspection is implemented in [`src/introspect.rs`](src/introspect.rs
 | `sqlite_schema` (type='trigger') | Trigger names, tables, and DDL |
 
 **Internal object filtering:** Objects with names matching these patterns are excluded:
-- `sqlite_*`, `sqlite_autoindex_*` — SQLite internal objects
+- `sqlite_*`, `sqlite_autoindex_*` — Turso internal system objects
 - `_schema_meta` — turso-converge internal state table
 - `_converge_new_*` — Temporary rebuild tables
 - `_cap_probe_*` — Capability probe artifacts
@@ -1627,9 +1627,9 @@ Database introspection is implemented in [`src/introspect.rs`](src/introspect.rs
 
 `Capabilities::detect(conn)` probes the connection:
 
-1. **SQLite version:** `SELECT sqlite_version()` → parsed into `(major, minor, patch)` tuple.
-2. **DROP COLUMN support:** Enabled for SQLite >= 3.35.0.
-3. **RENAME COLUMN support:** Enabled for SQLite >= 3.25.0.
+1. **Database version:** `SELECT sqlite_version()` → parsed into `(major, minor, patch)` tuple.
+2. **DROP COLUMN support:** Enabled for Turso >= 3.35.0.
+3. **RENAME COLUMN support:** Enabled for Turso >= 3.25.0.
 4. **FTS support:** Creates a temp table, attempts a `CREATE INDEX ... USING fts`, cleans up.
 5. **Vector support:** Attempts `CREATE TABLE ... (v vector32(1))`, cleans up.
 6. **Materialized view support:** Creates a temp table, attempts `CREATE MATERIALIZED VIEW`, cleans up.
@@ -1712,7 +1712,7 @@ pub enum MigrateError {
 
 | Variant | When | Display format |
 |---------|------|---------------|
-| `Turso(err)` | Any underlying Turso/libSQL database error | `"turso error: {err}"` |
+| `Turso(err)` | Any underlying Turso database error | `"turso error: {err}"` |
 | `Io { path, source }` | File read failure in `converge_from_path` or backup writing | `"I/O error at {path}: {source}"` |
 | `Statement { stmt, source, phase }` | A SQL statement failed during execution | `"migration statement failed ({phase}): {stmt}; cause: {source}"` |
 | `ForeignKeyViolation { table, rowid, parent }` | `PRAGMA foreign_key_check` found a violation after a table rebuild | `"foreign key violation: table={table}, rowid={rowid}, references={parent}"` |
@@ -1813,7 +1813,7 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `turso` | 0.5.0-pre.13 | Turso/libSQL database client |
+| `turso` | 0.5.0-pre.13 | Turso database client |
 | `turso_core` | 0.5.0-pre.13 | Core database features (FTS, filesystem, raw connection API) |
 | `blake3` | 1 | Fast cryptographic hashing for change detection |
 | `tracing` | 0.1 | Structured logging at key decision points |
@@ -1859,7 +1859,7 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 | Crash failpoint scaffolding | Full | `Failpoint` enum (test-only) |
 | Connection abstraction wrappers | Full | `ConnectionLike` trait + `*_like` helpers |
 | CLI workflows | Full | `validate` / `diff` / `plan` / `check` / `apply` |
-| Case-insensitive identifiers | Full | `CIString` keys matching SQLite semantics |
+| Case-insensitive identifiers | Full | `CIString` keys matching Turso semantics |
 | String-literal-aware SQL normalization | Full | Preserves case in literals |
 | Human-readable diff output | Full | `Display` impl for `SchemaDiff` |
 | Structured tracing | Full | `tracing` crate at key decision points |
@@ -1882,9 +1882,9 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 
 **FTS + triggers + materialized views require experimental Turso flags.** You must set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`. Without these flags, `MigrateError::UnsupportedFeature` is returned.
 
-**WITHOUT ROWID tables are not supported by Turso/libSQL.** The `detect_without_rowid` introspection exists in turso-converge for future compatibility, but Turso/libSQL (as of 3.50.4) returns `"WITHOUT ROWID tables are not supported"` at the parser level.
+**WITHOUT ROWID tables are not supported by Turso.** The `detect_without_rowid` introspection exists in turso-converge for future compatibility, but Turso (as of 3.50.4) returns `"WITHOUT ROWID tables are not supported"` at the parser level.
 
-**GENERATED columns are not supported by Turso/libSQL.** The `is_generated` column tracking exists in turso-converge for future compatibility, but Turso/libSQL (as of 3.50.4) returns `"GENERATED columns are not supported yet"` at the parser level.
+**GENERATED columns are not supported by Turso.** The `is_generated` column tracking exists in turso-converge for future compatibility, but Turso (as of 3.50.4) returns `"GENERATED columns are not supported yet"` at the parser level.
 
 **Snapshot cache is process-wide.** The `from_schema_sql` cache uses a `OnceLock<Mutex<HashMap>>` and is cleared when it exceeds 16 entries. In long-running processes with many distinct schemas, cache churn may occur.
 

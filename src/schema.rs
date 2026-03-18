@@ -2,7 +2,7 @@
 //!
 //! Every schema object carries a [`CIString`] name that preserves original
 //! spelling via `.raw()` while using case-folded comparison for `Ord`/`Eq`/`Hash`.
-//! This matches SQLite's case-insensitive identifier semantics.
+//! This matches Turso's case-insensitive identifier semantics.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -112,7 +112,7 @@ impl SchemaSnapshot {
     }
 }
 
-/// Parsed table metadata: columns, foreign keys, and SQLite table options.
+/// Parsed table metadata: columns, foreign keys, and table options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableInfo {
     pub name: String,
@@ -195,13 +195,13 @@ pub struct TriggerInfo {
     pub sql: String,
 }
 
-/// Detected capabilities of the target SQLite/libSQL connection.
+/// Detected capabilities of the target Turso database connection.
 #[derive(Debug, Clone)]
 pub struct Capabilities {
-    pub sqlite_version: (u32, u32, u32),
-    /// SQLite >= 3.35.0: ALTER TABLE DROP COLUMN
+    pub database_version: (u32, u32, u32),
+    /// Turso >= 3.35.0: ALTER TABLE DROP COLUMN
     pub supports_drop_column: bool,
-    /// SQLite >= 3.25.0: ALTER TABLE RENAME COLUMN
+    /// Turso >= 3.25.0: ALTER TABLE RENAME COLUMN
     pub supports_rename_column: bool,
     /// Whether the FTS (tantivy) module is available.
     pub has_fts_module: bool,
@@ -214,7 +214,7 @@ pub struct Capabilities {
 impl Default for Capabilities {
     fn default() -> Self {
         Self {
-            sqlite_version: (3, 45, 0),
+            database_version: (3, 45, 0),
             supports_drop_column: true,
             supports_rename_column: true,
             has_fts_module: false,

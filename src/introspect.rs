@@ -303,7 +303,7 @@ impl Capabilities {
         let has_materialized = probe_materialized_views(conn).await;
 
         Ok(Self {
-            sqlite_version: (major, minor, patch),
+            database_version: (major, minor, patch),
             supports_drop_column: (major, minor, patch) >= (3, 35, 0),
             supports_rename_column: (major, minor, patch) >= (3, 25, 0),
             has_fts_module: has_fts,
