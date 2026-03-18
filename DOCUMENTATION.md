@@ -987,8 +987,8 @@ Detected capabilities of the target Turso database connection. Source: [`src/sch
 ```rust
 pub struct Capabilities {
     pub database_version: (u32, u32, u32),
-    pub supports_drop_column: bool,     // Turso >= 3.35.0
-    pub supports_rename_column: bool,   // Turso >= 3.25.0
+    pub supports_drop_column: bool,     // >= 3.35.0
+    pub supports_rename_column: bool,   // >= 3.25.0
     pub has_fts_module: bool,
     pub has_vector_module: bool,
     pub has_materialized_views: bool,
@@ -1207,7 +1207,7 @@ Views are similarly sorted: a view is created only after all views it depends on
 
 ### Table Rebuild Procedure
 
-turso-converge follows the [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) with safety enhancements:
+turso-converge follows SQLite's [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) with safety enhancements:
 
 | Step | turso-converge | Safety Enhancement |
 |---|---|---|
@@ -1392,7 +1392,7 @@ The migration planner never drops tables matching these patterns:
 |---------|-------------|
 | `_schema_meta` | turso-converge's internal state table |
 | `_converge_new_*` | Temporary tables from in-progress rebuilds |
-| `sqlite_*` | Turso internal system tables |
+| `sqlite_*` | System tables |
 | `fts_dir_*` | Turso FTS internal tables |
 | `__turso_internal*` | Turso internal tables |
 
@@ -1609,7 +1609,7 @@ Database introspection is implemented in [`src/introspect.rs`](src/introspect.rs
 | `sqlite_schema` (type='trigger') | Trigger names, tables, and DDL |
 
 **Internal object filtering:** Objects with names matching these patterns are excluded:
-- `sqlite_*`, `sqlite_autoindex_*` — Turso internal system objects
+- `sqlite_*`, `sqlite_autoindex_*` — System objects
 - `_schema_meta` — turso-converge internal state table
 - `_converge_new_*` — Temporary rebuild tables
 - `_cap_probe_*` — Capability probe artifacts
@@ -1628,8 +1628,8 @@ Database introspection is implemented in [`src/introspect.rs`](src/introspect.rs
 `Capabilities::detect(conn)` probes the connection:
 
 1. **Database version:** `SELECT sqlite_version()` → parsed into `(major, minor, patch)` tuple.
-2. **DROP COLUMN support:** Enabled for Turso >= 3.35.0.
-3. **RENAME COLUMN support:** Enabled for Turso >= 3.25.0.
+2. **DROP COLUMN support:** Enabled for version >= 3.35.0.
+3. **RENAME COLUMN support:** Enabled for version >= 3.25.0.
 4. **FTS support:** Creates a temp table, attempts a `CREATE INDEX ... USING fts`, cleans up.
 5. **Vector support:** Attempts `CREATE TABLE ... (v vector32(1))`, cleans up.
 6. **Materialized view support:** Creates a temp table, attempts `CREATE MATERIALIZED VIEW`, cleans up.

@@ -199,9 +199,9 @@ pub struct TriggerInfo {
 #[derive(Debug, Clone)]
 pub struct Capabilities {
     pub database_version: (u32, u32, u32),
-    /// Turso >= 3.35.0: ALTER TABLE DROP COLUMN
+    /// >= 3.35.0: ALTER TABLE DROP COLUMN
     pub supports_drop_column: bool,
-    /// Turso >= 3.25.0: ALTER TABLE RENAME COLUMN
+    /// >= 3.25.0: ALTER TABLE RENAME COLUMN
     pub supports_rename_column: bool,
     /// Whether the FTS (tantivy) module is available.
     pub has_fts_module: bool,

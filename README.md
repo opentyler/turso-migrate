@@ -404,7 +404,7 @@ turso-converge uses a rich internal schema representation:
 
 ## The 12-Step ALTER TABLE Procedure
 
-Turso has limited native ALTER TABLE support. For changes beyond ADD/DROP COLUMN, the [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) is prescribed. turso-converge follows it with safety enhancements:
+Turso has limited native ALTER TABLE support. For changes beyond ADD/DROP COLUMN, SQLite's [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) is prescribed. turso-converge follows it with safety enhancements:
 
 | Step | turso-converge | Safety Enhancement |
 |-------------|---------------|-------------------|
