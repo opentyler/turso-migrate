@@ -2,20 +2,31 @@
 
 Declarative schema convergence for [Turso](https://turso.tech/) databases.
 
-Instead of numbered migration files (`001_up.sql`, `002_up.sql`, ...), you define your desired schema in a single SQL file and turso-converge automatically diffs and converges any database to match it. A BLAKE3 hash fast-path makes subsequent checks near-instant when the schema hasn't changed.
+Define your desired schema once. turso-converge diffs it against the live database and applies the minimal set of DDL operations to converge. A BLAKE3 hash fast-path makes subsequent checks sub-millisecond.
 
-## Quick Start
+```
+Traditional migrations:           turso-converge:
 
-**Requirements:** Rust 1.85+ (edition 2024), Tokio multi-thread runtime, turso crate
+001_create_users.sql             turso_schema.sql  ← single source of truth
+002_add_email.sql                       ↓
+003_create_posts.sql             converge(&conn, SCHEMA)
+004_add_index.sql                       ↓
+005_rename_col.sql               automatic diff → plan → execute
+```
+
+## Install
 
 ```toml
-# Cargo.toml
 [dependencies]
 turso-converge = { git = "https://github.com/opentyler/turso-converge" }
 turso = "0.5.0-pre.13"
 turso_core = { version = "0.5.0-pre.13", features = ["fts", "fs"] }
 tokio = { version = "1", features = ["full"] }
 ```
+
+Requires **Rust 1.85+** (edition 2024) and a **Tokio multi-thread** runtime.
+
+## Quick Start
 
 ```rust
 use turso_converge::converge;
@@ -45,88 +56,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let conn = db.connect()?;
 
-    // First call creates all tables and indexes.
-    // Subsequent calls with the same schema are <1ms (BLAKE3 hash match).
     converge(&conn, SCHEMA).await?;
+    // First run: creates tables + indexes.
+    // Every run after: <1ms hash check, returns immediately.
 
     Ok(())
 }
 ```
 
-## API Reference
+## How It Works
 
-### `converge(conn, schema_sql)` — Backward-Compatible Entry Point
-
-The simplest API. Uses a permissive policy (allows all changes including table drops) for backward compatibility.
-
-```rust
-const SCHEMA: &str = include_str!("../my_schema.sql");
-turso_converge::converge(&conn, SCHEMA).await?;
+```
+converge() called
+    │
+    ├─ Normalize SQL → BLAKE3 hash → compare with stored hash
+    ├─ Check PRAGMA schema_version for out-of-band drift
+    │
+    ├─ Both match? → return (<1ms)                          ← fast path
+    │
+    └─ Mismatch → full convergence:                         ← slow path
+         1. Acquire migration lease
+         2. Build desired snapshot (in-memory DB from SQL)
+         3. Introspect actual database
+         4. Compute diff (14 categories)
+         5. Check policy → validate safety → generate plan
+         6. Execute in 3 phases (DDL → FTS → views/triggers)
+         7. Atomically update hash + version
+         8. Release lease
 ```
 
-### `converge_with_options(conn, schema_sql, options)` — Full-Featured API
+## API
 
-Returns a detailed `ConvergeReport` and supports policy enforcement, dry-run mode, and configurable behavior.
+### Simple — `converge`
+
+Uses a permissive policy (allows all changes). Good for development.
+
+```rust
+turso_converge::converge(&conn, include_str!("../schema.sql")).await?;
+```
+
+### Production — `converge_with_options`
+
+Returns a `ConvergeReport`. Supports policy enforcement, dry-run, backup hooks, data migrations, and more.
 
 ```rust
 use turso_converge::{converge_with_options, ConvergeOptions, ConvergePolicy, ConvergeMode};
 
-// Safe defaults: blocks destructive changes (table drops, column drops)
-let options = ConvergeOptions::default();
-
-// Or permissive: allows all changes
-let options = ConvergeOptions {
-    policy: ConvergePolicy::permissive(),
-    ..Default::default()
-};
-
-// Or dry-run: preview changes without executing
-let options = ConvergeOptions {
-    policy: ConvergePolicy::permissive(),
-    dry_run: true,
-    ..Default::default()
-};
+let options = ConvergeOptions::default(); // safe: blocks table/column drops
 
 let report = converge_with_options(&conn, SCHEMA, &options).await?;
-
 match report.mode {
-    ConvergeMode::FastPath => println!("Schema unchanged (<1ms)"),
-    ConvergeMode::SlowPath => println!("Applied {} changes", report.tables_created + report.tables_rebuilt),
-    ConvergeMode::DryRun => println!("Would apply: {:?}", report.plan_sql),
-    ConvergeMode::CrashRecovery => println!("Recovered from interrupted migration"),
-    ConvergeMode::NoOp => println!("Slow path ran but no changes needed"),
+    ConvergeMode::FastPath      => println!("unchanged (<1ms)"),
+    ConvergeMode::SlowPath      => println!("applied changes"),
+    ConvergeMode::DryRun        => println!("plan: {:?}", report.plan_sql),
+    ConvergeMode::CrashRecovery => println!("recovered from crash"),
+    ConvergeMode::NoOp          => println!("no changes needed"),
 }
 ```
 
-### `ConvergePolicy` — Destructive Change Protection
-
-Controls what the migration is allowed to do. Default policy blocks destructive changes.
-
-```rust
-use turso_converge::ConvergePolicy;
-
-// Safe defaults (recommended for production):
-let policy = ConvergePolicy::default();
-// allow_table_drops: false
-// allow_column_drops: false
-// allow_table_rebuilds: true
-// max_tables_affected: None
-
-// Permissive (for development or when you know what you're doing):
-let policy = ConvergePolicy::permissive();
-
-// Custom:
-let policy = ConvergePolicy {
-    allow_table_drops: true,
-    allow_column_drops: false,
-    allow_table_rebuilds: true,
-    max_tables_affected: Some(5),  // Safety limit
-};
-```
-
-When a policy violation is detected, `converge_with_options` returns `Err(MigrateError::PolicyViolation { .. })` with details about what was blocked and why.
-
-### `ConvergeOptions` — Full Configuration
+### `ConvergeOptions`
 
 ```rust
 use std::time::Duration;
@@ -145,11 +133,7 @@ let options = ConvergeOptions {
 };
 ```
 
-The `busy_timeout` is applied as `PRAGMA busy_timeout` before executing the migration plan. This prevents busy errors when another connection holds a write lock.
-
-### `ConvergeReport` — What Happened
-
-Returned by `converge_with_options`. Includes the execution mode, statistics about what changed, and timing.
+### `ConvergeReport`
 
 ```rust
 pub struct ConvergeReport {
@@ -164,348 +148,279 @@ pub struct ConvergeReport {
     pub views_changed: usize,
     pub data_migrations_applied: usize,
     pub duration: Duration,
-    pub plan_sql: Vec<String>,     // Populated in dry-run mode
+    pub plan_sql: Vec<String>,     // Populated in dry-run mode only
 }
 ```
 
-### `converge_from_path(conn, path)`
-
-Reads a schema file from disk, then converges using the permissive policy.
+### Dry Run — Preview Without Executing
 
 ```rust
-turso_converge::converge_from_path(&conn, "schemas/turso_schema.sql").await?;
-```
-
-### `converge_multi(conn, &[...])` and `converge_multi_with_options(...)`
-
-Compose schema from multiple SQL fragments/files (concatenated in order), then converge as one schema:
-
-```rust
-let parts = [
-    include_str!("schemas/core.sql"),
-    include_str!("schemas/indexes.sql"),
-    include_str!("schemas/views.sql"),
-];
-
-turso_converge::converge_multi(&conn, &parts).await?;
-```
-
-### `rollback_to_previous(conn)`
-
-Re-converges to the previous stored schema snapshot (`previous_schema_sql` in `_schema_meta`):
-
-```rust
-turso_converge::rollback_to_previous(&conn).await?;
-```
-
-### `validate_schema(schema_sql)`
-
-Validates schema SQL by executing it against an in-memory Turso database:
-
-```rust
-turso_converge::validate_schema(include_str!("../turso_schema.sql")).await?;
-```
-
-### `ConnectionLike` wrappers
-
-For codebases that wrap `turso::Connection`, use:
-
-```rust
-use turso_converge::{ConnectionLike, converge_like, converge_like_with_options, schema_version_like};
-```
-
-### `DataMigration` — Idempotent Post-DDL Data Steps
-
-Data migrations run after schema convergence and are tracked in `_schema_meta` so each migration ID applies once:
-
-```rust
-use turso_converge::{ConvergeOptions, ConvergePolicy, DataMigration, converge_with_options};
-
 let options = ConvergeOptions {
     policy: ConvergePolicy::permissive(),
+    dry_run: true,
+    ..Default::default()
+};
+let report = converge_with_options(&conn, SCHEMA, &options).await?;
+for stmt in &report.plan_sql {
+    println!("{stmt};");
+}
+```
+
+### Additional Entry Points
+
+| Function | Description |
+|----------|-------------|
+| `converge_from_path(&conn, "schema.sql")` | Read schema from file, converge with permissive policy |
+| `converge_multi(&conn, &[part1, part2])` | Compose schema from multiple SQL fragments |
+| `converge_multi_with_options(...)` | Multi-fragment with full options |
+| `validate_schema(sql)` | Validate schema against in-memory DB (no side effects) |
+| `schema_version(&conn)` | Read the schema version counter |
+| `rollback_to_previous(&conn)` | Re-converge to the previous schema snapshot |
+| `is_read_only(&conn)` | Check if connection is read-only |
+| `compute_diff(&desired, &actual)` | Compute diff between two `SchemaSnapshot`s |
+
+
+## Policy — Destructive Change Protection
+
+Default policy blocks accidental data loss. Customize per environment:
+
+```rust
+use turso_converge::ConvergePolicy;
+
+// Production — safe defaults:
+let policy = ConvergePolicy::default();
+// allow_table_drops: false    ← blocks DROP TABLE
+// allow_column_drops: false   ← blocks DROP COLUMN
+// allow_table_rebuilds: true
+// max_tables_affected: None
+
+// Development — allow everything:
+let policy = ConvergePolicy::permissive();
+
+// Custom — fine-grained control:
+let policy = ConvergePolicy {
+    allow_table_drops: true,
+    allow_column_drops: false,
+    allow_table_rebuilds: true,
+    max_tables_affected: Some(5),
+};
+```
+
+Violations return `MigrateError::PolicyViolation` with details about what was blocked and why.
+
+## Data Migrations
+
+Idempotent post-DDL data steps, tracked by ID so each applies exactly once:
+
+```rust
+use turso_converge::{ConvergeOptions, DataMigration};
+
+let options = ConvergeOptions {
     data_migrations: vec![DataMigration {
-        id: "seed-users".to_string(),
+        id: "seed-admin".to_string(),
         statements: vec![
-            "INSERT INTO users (id, name) VALUES ('u1', 'alice')".to_string(),
+            "INSERT OR IGNORE INTO users (id, email) VALUES ('admin', 'admin@example.com')".into(),
         ],
     }],
     ..Default::default()
 };
-
-let report = converge_with_options(&conn, SCHEMA, &options).await?;
-println!("data migrations applied: {}", report.data_migrations_applied);
 ```
 
-### `SchemaDiff` — Human-Readable Diff
+## Column Rename Detection
 
-The diff engine produces a `SchemaDiff` with a `Display` implementation for human-readable output:
+turso-converge detects renames automatically when there's an unambiguous 1:1 match (same type, constraints, ordinal position). For ambiguous cases, provide explicit hints:
+
+```rust
+use turso_converge::{ConvergeOptions, ColumnRenameHint};
+
+let options = ConvergeOptions {
+    rename_hints: vec![ColumnRenameHint {
+        table: "users".into(),
+        from: "name".into(),
+        to: "display_name".into(),
+    }],
+    ..Default::default()
+};
+```
+
+## Pre-Destructive Hooks
+
+Gate destructive changes with a callback or automatic backup:
+
+```rust
+use std::sync::Arc;
+
+let options = ConvergeOptions {
+    // Automatic SQL backup before destructive changes:
+    backup_before_destructive: Some("backups/".into()),
+
+    // Or a programmatic gate:
+    pre_destructive_hook: Some(Arc::new(|changes| {
+        if !changes.tables_to_drop.is_empty() {
+            Err("refusing to drop tables in production".into())
+        } else {
+            Ok(())
+        }
+    })),
+    ..Default::default()
+};
+```
+
+## Human-Readable Diff
 
 ```rust
 use turso_converge::{SchemaSnapshot, compute_diff};
 
-let desired = SchemaSnapshot::from_schema_sql(schema_sql).await?;
+let desired = SchemaSnapshot::from_schema_sql(SCHEMA).await?;
 let actual = SchemaSnapshot::from_connection(&conn).await?;
-let diff = compute_diff(&desired, &actual);
-
-println!("{diff}");
-// + TABLE users
-// + TABLE posts
-// ~ TABLE documents: REBUILD
-// - TABLE legacy_cache
-// + INDEX idx_posts_user
-// + FTS INDEX idx_docs_fts
+println!("{}", compute_diff(&desired, &actual));
 ```
 
-### `SchemaSnapshot::to_sql()`
+```
++ TABLE users
++ TABLE posts
+~ TABLE documents: REBUILD
+- TABLE legacy_cache
++ INDEX idx_posts_user
++ FTS INDEX idx_docs_fts
+```
 
-Introspect a live database and generate deterministic DDL. Tables are topologically sorted by foreign key dependencies.
+## ConnectionLike — Wrapper Support
+
+For codebases that wrap `turso::Connection`:
 
 ```rust
-let snapshot = SchemaSnapshot::from_connection(&conn).await?;
-std::fs::write("turso_schema.sql", snapshot.to_sql())?;
+use turso_converge::{ConnectionLike, converge_like, converge_like_with_options, schema_version_like};
+
+struct MyConn { inner: turso::Connection }
+
+impl ConnectionLike for MyConn {
+    fn as_turso_connection(&self) -> &turso::Connection { &self.inner }
+}
+
+converge_like(&my_conn, SCHEMA).await?;
 ```
 
-### `schema_version(conn)`
+## Safety
 
-Returns the schema version counter (incremented atomically each time DDL is applied).
+turso-converge is designed to be safe by default:
 
-```rust
-let version = turso_converge::schema_version(&conn).await?;
+| Feature | How |
+|---------|-----|
+| **Destructive change protection** | `ConvergePolicy` blocks table/column drops by default |
+| **NOT NULL validation** | Caught before DDL — error names the exact column and table |
+| **Foreign key integrity** | Deferred FK checks + post-rebuild `PRAGMA foreign_key_check` + FK-ordered creation |
+| **Schema drift detection** | `PRAGMA schema_version` monitoring catches out-of-band changes |
+| **Migration lease** | Cooperative lease prevents concurrent migrations (5-min TTL with phase-guarded refresh) |
+| **Crash recovery** | `migration_in_progress` flag forces re-convergence; temp tables filtered from introspection |
+| **Atomic state** | Hash + version + flags updated in a single transaction |
+| **Protected namespace** | `_schema_meta`, `_converge_new_*`, `sqlite_*`, etc. never dropped |
+| **AUTOINCREMENT preservation** | `sqlite_sequence` values saved and restored across rebuilds |
+| **Busy timeout** | `PRAGMA busy_timeout` (default 5s) prevents busy errors |
+| **Feature preflight** | Runtime probes detect FTS/vector/materialized view support before execution |
+| **Read-only guard** | `MigrateError::ReadOnly` returned immediately on replica connections |
+
+## Supported Schema Features
+
+| Feature | Notes |
+|---------|-------|
+| Tables (CREATE, ALTER, DROP) | FK-ordered creation, policy-controlled drops |
+| Standard indexes | |
+| FTS indexes (`USING fts`) | Turso tantivy engine, 3-phase execution |
+| Vector columns (`vector32`) | Diffed and preserved during rebuilds |
+| Materialized views | Turso IVM |
+| Regular views | Dependency-ordered, fixed-point resolution |
+| Triggers | |
+| Foreign keys | PRAGMA-based + SQL fallback detection |
+| COLLATE clauses | Detected via DDL parsing |
+| GENERATED columns | Excluded from data copy |
+| STRICT / WITHOUT ROWID | Detected from DDL |
+| AUTOINCREMENT | Sequence preserved across rebuilds |
+| UNIQUE constraints | Via `PRAGMA index_list` |
+| ADD COLUMN | O(1), nullable or with DEFAULT |
+| DROP COLUMN | O(1) when eligible |
+
+## CLI
+
+Development and CI workflow commands:
+
+```bash
+turso-converge dump     my.db                # Extract schema SQL from existing DB
+turso-converge validate schema.sql           # Validate syntax against in-memory DB
+turso-converge diff     my.db schema.sql     # Human-readable diff
+turso-converge plan     my.db schema.sql     # Show migration SQL (dry-run)
+turso-converge check    my.db schema.sql     # Exit 0 if converged, 1 if not
+turso-converge apply    my.db schema.sql     # Apply convergence
 ```
 
-### `MigrateError` — Error Types
+`dump` is the bootstrapping entry point — extract your existing database's schema to start using turso-converge. `check` is designed for CI gates — exits non-zero if the schema is not converged.
+
+## Error Types
 
 All operations return `Result<_, MigrateError>`:
 
-| Variant | When | Fields |
-|---------|------|--------|
-| `Turso(turso::Error)` | Underlying database error | Source error |
-| `Io { path, source }` | File read failure (converge_from_path) | Path + IO error |
-| `Statement { stmt, source, phase }` | SQL execution failed | The SQL, error, and phase (`DDL`, `FTS`, or `views_triggers`) |
-| `ForeignKeyViolation { table, rowid, parent }` | FK check failed after rebuild | Table, row, and referenced parent |
-| `Schema(String)` | Schema validation error (e.g., NOT NULL without DEFAULT) | Descriptive message |
-| `PolicyViolation { message, blocked_operations }` | Policy blocked a destructive change | What was blocked and why |
-| `MigrationBusy { owner, remaining_secs }` | Another migration holds the lease | Owner ID and seconds until expiry |
-| `UnsupportedFeature(String)` | Schema uses FTS/vector/materialized views but target lacks support | Descriptive message |
-| `ReadOnly` | Connection is read-only / replica role | Migration requires write access |
-| `PreDestructiveHookRejected { .. }` | User hook rejected destructive operations | Hook message + blocked ops |
-| `InjectedFailure { failpoint }` | Test failpoint intentionally aborted convergence | Failpoint identifier |
-
-## How It Works
-
-```
-Developer edits turso_schema.sql (desired end-state)
-    ↓
-Consumer embeds: include_str!("turso_schema.sql")
-    ↓
-On each database connection:
-    1. Normalize schema SQL → BLAKE3 hash → compare against stored hash
-    2. Check PRAGMA schema_version for out-of-band drift
-    3. Both match → return (<1ms, fast-path)
-    4. Mismatch → full convergence:
-       a. Build pristine snapshot (in-memory Turso DB from schema SQL)
-       b. Introspect actual database (sqlite_schema + PRAGMA table_xinfo)
-       c. Compute diff (14 categories)
-       d. Check policy (block destructive changes if configured)
-       e. Validate rebuild safety (NOT NULL columns require DEFAULT)
-       f. Generate migration plan (FK-ordered, capability-aware)
-       g. Execute plan (deferred FK checks, FK validation after rebuild)
-       h. Atomically update hash + version + clear in-progress flag
-```
-
-## Safety Features
-
-### Destructive Change Protection
-`converge_with_options` with default `ConvergePolicy` blocks table drops and column drops. An accidental schema edit won't destroy data — you get a clear `PolicyViolation` error instead.
-
-### NOT NULL Column Validation
-Adding a `NOT NULL` column without a `DEFAULT` value to an existing table is caught **before** any DDL executes. The error message tells you exactly which column on which table needs a default.
-
-### Foreign Key Integrity
-- `PRAGMA defer_foreign_keys = ON` before table rebuilds prevents failures with self-referential and cyclic foreign keys
-- `PRAGMA foreign_key_check` runs after rebuilds to catch FK violations before COMMIT
-- FK dependency ordering ensures tables are created in the right order
-
-### Schema Drift Detection
-Even when the desired schema hash matches, turso-converge checks `PRAGMA schema_version` to detect out-of-band changes (manual SQL, admin operations, replica divergence). If drift is detected, it forces a full convergence to correct the database.
-
-### Migration Lease (Concurrency Protection)
-Only one migration runs at a time per database. `converge_with_options` acquires a cooperative lease in `_schema_meta` (owner + TTL) before entering the slow path. If another process holds the lease, the caller gets `MigrateError::MigrationBusy` with the owner and time remaining. The lease expires automatically after 5 minutes (crash recovery). Before each execution phase transition, turso-converge performs an atomic guarded lease refresh (owner must still match and lease must still be unexpired), and aborts immediately if the lease is lost.
-
-### Crash Recovery
-If a migration is interrupted, the `migration_in_progress` flag and phase cursor force a full re-convergence on the next connection. Internal temp tables (`_converge_new_*`) are filtered from introspection to prevent crash artifacts from corrupting the diff.
-
-### Atomic State Updates
-Hash, schema version, and the in-progress flag are updated in a single `BEGIN IMMEDIATE` / `COMMIT` transaction. A crash between these updates is impossible.
-
-### Protected Table Namespace
-Internal tables (`_schema_meta`, `_converge_new_*`, `_cap_probe_*`, `sqlite_*`, etc.) are never dropped by the migration planner, even if they appear in the diff.
-
-### AUTOINCREMENT Preservation
-Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT counters aren't reset.
-
-### Busy Timeout
-`PRAGMA busy_timeout` is set before migration execution (configurable via `ConvergeOptions.busy_timeout`, default 5 seconds). This prevents busy errors when another connection holds a write lock.
-
-## Supported Features
-
-| Feature | Support |
-|---------|---------|
-| Tables (CREATE, ALTER, DROP) | ✅ |
-| Standard indexes | ✅ |
-| FTS indexes (tantivy, `USING fts`) | ✅ |
-| Vector columns (`vector32`) | ✅ |
-| Materialized views (IVM) | ✅ |
-| Regular views (with dependency ordering) | ✅ |
-| Triggers | ✅ |
-| Foreign keys (PRAGMA-based detection) | ✅ |
-| COLLATE clauses | ✅ (detected via SQL parsing) |
-| GENERATED columns | ✅ (excluded from data copy) |
-| STRICT tables | ✅ (detected) |
-| WITHOUT ROWID tables | ✅ (detected) |
-| AUTOINCREMENT | ✅ (sequence preserved across rebuilds) |
-| UNIQUE constraints | ✅ (via PRAGMA index_list) |
-| ADD COLUMN (nullable or with DEFAULT) | ✅ (O(1), no rebuild) |
-| DROP COLUMN (eligible columns) | ✅ (O(1) when not PK/indexed/FK-referenced/view-referenced) |
-| Feature preflight validation | ✅ (runtime capability probes for FTS, vector, materialized view) |
-| Migration lease (concurrency) | ✅ (cooperative lease in _schema_meta) |
-| Destructive change protection | ✅ (ConvergePolicy) |
-| Dry-run mode | ✅ (plan without executing) |
-| Runtime schema validation API | ✅ (`validate_schema`) |
-| Crash recovery | ✅ (`migration_in_progress` flag) |
-| Schema drift detection | ✅ (PRAGMA schema_version) |
-| Column rename detection | ✅ (conservative heuristic + `ColumnRenameHint`) |
-| Rollback to previous schema | ✅ (`rollback_to_previous`) |
-| Multi-file schema composition | ✅ (`converge_multi*`) |
-| Idempotent data migrations | ✅ (`DataMigration` + `ConvergeOptions.data_migrations`) |
-| Read-only/replica guard | ✅ (`ReadOnly` + `is_read_only`) |
-| Pre-destructive backup snapshot | ✅ (`backup_before_destructive`) |
-| Pre-destructive callback gate | ✅ (`pre_destructive_hook`) |
-| Crash failpoint scaffolding | ✅ (`Failpoint` in `ConvergeOptions`) |
-| Connection abstraction wrappers | ✅ (`ConnectionLike` + `*_like` helpers) |
-| CLI workflows | ✅ (`turso-converge diff/plan/check/apply/validate`) |
-| Case-insensitive identifiers | ✅ (CIString keys) |
-| String-literal-aware SQL normalization | ✅ (preserves case in literals) |
-| Human-readable diff output | ✅ (Display for SchemaDiff) |
-| Structured tracing | ✅ (tracing crate at key decision points) |
-
-## Schema Type System
-
-turso-converge uses a rich internal schema representation:
-
-- **`SchemaSnapshot`** — Complete database schema with case-insensitive `CIString` keys
-- **`TableInfo`** — Columns, foreign keys, STRICT/WITHOUT ROWID/AUTOINCREMENT flags
-- **`ColumnInfo`** — Type, nullability, default, primary key, collation, generated/hidden status
-- **`IndexInfo`** — Table, SQL, FTS flag, UNIQUE flag, indexed columns
-- **`ViewInfo`** — Name, SQL, materialized view flag
-- **`TriggerInfo`** — Name, attached table, SQL
-- **`ForeignKey`** — From/to columns, referenced table, ON DELETE/UPDATE actions
-- **`Capabilities`** — Detected database version and available features
-
-## The 12-Step ALTER TABLE Procedure
-
-Turso has limited native ALTER TABLE support. For changes beyond ADD/DROP COLUMN, SQLite's [12-step ALTER TABLE procedure](https://www.sqlite.org/lang_altertable.html#otheralter) is prescribed. turso-converge follows it with safety enhancements:
-
-| Step | turso-converge | Safety Enhancement |
-|-------------|---------------|-------------------|
-| 1. Disable FK constraints | `PRAGMA defer_foreign_keys = ON` | Defers rather than disables — violations still caught |
-| 2. Begin transaction | `BEGIN IMMEDIATE` | Write lock prevents concurrent migration |
-| 3. Remember schema objects | `SchemaSnapshot::from_connection()` | Full introspection via `PRAGMA table_xinfo` |
-| 4. Create new table | `CREATE TABLE "_converge_new_{table}"` | Correct create-copy-drop-rename order |
-| 5. Copy data | `INSERT INTO ... SELECT ...` | Generated columns excluded, defaults for new columns |
-| 6. Drop old table | `DROP TABLE` | Protected tables never dropped |
-| 7. Rename new to old | `ALTER TABLE ... RENAME TO` | |
-| 8-9. Recreate objects | Auto-detected by diff engine | Views use fixed-point ordering for dependencies |
-| 10. FK check | `PRAGMA foreign_key_check` | Returns structured `ForeignKeyViolation` error |
-| 11. Commit | `COMMIT` | Atomic with hash + version update |
-| 12. Restore FK mode | Automatic | `defer_foreign_keys` is per-transaction |
-
-### Execution Phases
-
-```
-Phase 1 (transactional):
-  PRAGMA defer_foreign_keys = ON → BEGIN IMMEDIATE →
-  DROP triggers → DROP views → DROP indexes → DROP tables →
-  CREATE tables (FK-ordered) → ADD COLUMN → Table rebuilds →
-  CREATE indexes → PRAGMA foreign_key_check → COMMIT
-
-Phase 2 (non-transactional):
-  DROP FTS indexes → CREATE FTS indexes
-
-Phase 3 (transactional):
-  CREATE views (fixed-point retry for unresolved deps) → CREATE triggers
-```
-
-## SQL Normalization
-
-turso-converge uses a string-literal-aware SQL normalizer that:
-- **Lowercases** keywords and identifiers outside of string literals
-- **Preserves case** inside `'single'` and `"double"` quoted strings
-- **Strips** SQL comments (both `--` line and `/* block */` styles)
-- **Collapses** whitespace to single spaces
-
-This means:
-- `WHERE status = 'Active'` and `WHERE status = 'active'` are correctly treated as **different**
-- `CREATE  TABLE   foo` and `CREATE TABLE foo` are correctly treated as **the same**
-- Adding a comment to your schema file doesn't trigger a full convergence
-- `INTEGER` and `integer` are correctly treated as **the same** (case-insensitive type comparison)
+| Error | When |
+|-------|------|
+| `PolicyViolation` | Policy blocked a destructive change |
+| `Schema(msg)` | Validation error (NOT NULL without DEFAULT, empty schema, etc.) |
+| `MigrationBusy` | Another migration holds the lease |
+| `ReadOnly` | Connection is read-only |
+| `UnsupportedFeature` | Schema uses FTS/vector/materialized views without builder flags |
+| `ForeignKeyViolation` | FK check failed after table rebuild |
+| `Statement` | SQL execution failed (includes the SQL, error, and phase) |
+| `PreDestructiveHookRejected` | User hook rejected destructive changes |
+| `Turso(err)` | Underlying database error |
+| `Io` | File I/O error (converge_from_path, backup) |
+| `InjectedFailure` | Test-only failpoint (never in production) |
 
 ## Known Limitations
 
-### Fundamental
-
-**Rename detection is conservative.** Automatic rename detection only applies when there is an unambiguous 1:1 match (same type/constraints/position). Use `ColumnRenameHint` for non-positional or ambiguous rename scenarios.
+**Rename detection is conservative.** Automatic rename detection only applies when there is an unambiguous 1:1 match (same type, constraints, ordinal position). Use `ColumnRenameHint` for ambiguous renames.
 
 **Table rebuilds copy all rows.** Large tables take proportional time.
 
-**Rollback scope is single-step.** `rollback_to_previous` restores the most recent prior schema snapshot, not arbitrary historical versions.
-
-### Implementation-Specific
-
-**COLLATE detection is SQL-based.** Extracts COLLATE clauses from CREATE TABLE SQL using pattern matching, not a full SQL parser. Unusual formatting could be missed.
-
-**FTS + triggers require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`.
+**Rollback is single-step.** `rollback_to_previous` restores the most recent prior schema, not arbitrary history.
 
 **WITHOUT ROWID and GENERATED columns are not supported by Turso** (as of 3.50.4). turso-converge includes introspection support for future compatibility, but these features will fail at the Turso parser level.
 
-## Running Tests
+**FTS, triggers, and materialized views require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`.
+
+## Tests
 
 ```bash
 cargo test
 ```
 
-152 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement (all four policy fields), dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, unsupported feature detection, NoOp mode, migration lease contention, protected table namespace, data integrity verification, and index functionality verification. In-memory Turso databases, no external services.
+152 tests. In-memory Turso databases, no external services.
 
-## CLI
+## Full Documentation
 
-The crate now ships a small CLI for development/CI workflows:
+See **[DOCUMENTATION.md](DOCUMENTATION.md)** for the comprehensive reference, including:
 
-```bash
-turso-converge dump data/user.db                            # Extract schema SQL from existing DB
-turso-converge validate schemas/turso_schema.sql
-turso-converge diff data/user.db schemas/turso_schema.sql
-turso-converge plan data/user.db schemas/turso_schema.sql
-turso-converge check data/user.db schemas/turso_schema.sql
-turso-converge apply data/user.db schemas/turso_schema.sql
-```
+- Complete API reference with exact signatures and source links
+- Configuration reference (all fields, defaults, types)
+- Schema type system (SchemaSnapshot, TableInfo, ColumnInfo, etc.)
+- Diff engine internals (14 categories, column classification rules, rename algorithm)
+- Migration plan generation (statement ordering, FK topological sort, rebuild procedure)
+- Execution engine (3-phase execution, view fixed-point resolution, lease verification)
+- Safety feature details (each mechanism explained in depth)
+- SQL normalization algorithm
+- Introspection details (PRAGMAs, capability probing, snapshot caching)
+- Internal state table (`_schema_meta` keys)
+- Architecture and module map
 
 ## Background
 
-turso-converge is a Rust implementation of the approach described in David Rothlis and William Manley's [Simple declarative schema migration for SQLite](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) (2022). turso-converge extends the original with:
+Rust implementation of the approach from David Rothlis and William Manley's [Simple declarative schema migration for SQLite](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) (2022), extended with:
 
-| Area | Original (Python) | turso-converge |
-|------|-------------------|---------------|
-| Triggers & views | Not supported | Full support with dependency ordering |
-| FTS indexes | N/A | Turso tantivy FTS with 3-phase execution |
-| Vector columns | N/A | `vector32(N)` diffed and preserved |
-| Change detection | Always full introspection | BLAKE3 hash + drift detection (<1ms) |
-| Crash recovery | None | `migration_in_progress` flag + phase cursor + internal temp table filtering |
-| FK handling | Basic | PRAGMA-based detection, deferred checks, post-rebuild validation |
-| Introspection | `PRAGMA table_info` | `PRAGMA table_xinfo` + `index_list` + `foreign_key_list` |
-| Schema model | Basic columns | COLLATE, GENERATED, UNIQUE, STRICT, WITHOUT ROWID, AUTOINCREMENT |
-| Safety | None | Policy enforcement, NOT NULL validation, protected namespaces |
-| API | Single function | `converge` + `converge_with_options` + `SchemaDiff` Display |
-| Observability | None | Structured tracing + ConvergeReport |
+- Triggers and views (with dependency ordering)
+- Turso tantivy FTS with 3-phase execution
+- Vector columns (`vector32`)
+- BLAKE3 hash fast-path + drift detection
+- Crash recovery with phase cursor
+- Policy enforcement and NOT NULL validation
+- Cooperative migration lease with atomic phase-guarded refresh
+- Structured tracing and detailed reporting
 
 ## License
 
