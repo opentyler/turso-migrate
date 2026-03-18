@@ -79,6 +79,7 @@
   - [Pre-Destructive Hook](#pre-destructive-hook)
   - [Read-Only Guard](#read-only-guard)
 - [CLI Reference](#cli-reference)
+  - [dump](#cli-dump)
   - [validate](#cli-validate)
   - [diff](#cli-diff)
   - [plan](#cli-plan)
@@ -1479,6 +1480,31 @@ All convergence operations check `PRAGMA query_only` before proceeding. If the c
 turso-converge ships a CLI binary for development and CI workflows. Source: [`src/bin/turso-converge.rs`](src/bin/turso-converge.rs).
 
 The CLI opens local databases with all experimental flags enabled (`experimental_index_method`, `experimental_materialized_views`, `experimental_triggers`).
+
+<a id="cli-dump"></a>
+### `dump`
+
+```bash
+turso-converge dump <db-path>
+```
+
+Extracts the schema from an existing database and prints it as SQL to stdout. Tables are topologically sorted by foreign key dependencies. Internal tables (`_schema_meta`, `sqlite_*`, etc.) are excluded. Standard indexes are emitted first, then FTS indexes, then views, then triggers.
+
+Exits with code 0 on success, or code 1 if the database has no user tables.
+
+**Use case:** Bootstrap turso-converge on an existing database. Pipe the output to a file to create your initial schema definition:
+
+```bash
+turso-converge dump my.db > turso_schema.sql
+```
+
+From this point forward, edit `turso_schema.sql` and use `converge` to apply changes.
+
+**Programmatic equivalent:**
+```rust
+let snapshot = SchemaSnapshot::from_connection(&conn).await?;
+std::fs::write("turso_schema.sql", snapshot.to_sql())?;
+```
 
 <a id="cli-validate"></a>
 ### `validate`

@@ -86,6 +86,18 @@ async fn run() -> Result<(), String> {
             }
             println!("schema is converged");
         }
+        "dump" => {
+            let db_path = required_arg(args.next(), "<db-path>")?;
+            let conn = open_local_connection(&db_path).await?;
+            let snapshot = SchemaSnapshot::from_connection(&conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            let sql = snapshot.to_sql();
+            if sql.is_empty() {
+                return Err("database has no user tables".to_string());
+            }
+            println!("{sql}");
+        }
         "apply" => {
             let db_path = required_arg(args.next(), "<db-path>")?;
             let schema_path = required_arg(args.next(), "<schema.sql>")?;
@@ -130,7 +142,7 @@ async fn open_local_connection(path: &str) -> Result<turso::Connection, String> 
 
 fn print_usage() {
     println!(
-        "turso-converge <command> [args]\n\nCommands:\n  validate <schema.sql>\n  diff <db-path> <schema.sql>\n  plan <db-path> <schema.sql>\n  check <db-path> <schema.sql>\n  apply <db-path> <schema.sql>"
+        "turso-converge <command> [args]\n\nCommands:\n  dump <db-path>\n  validate <schema.sql>\n  diff <db-path> <schema.sql>\n  plan <db-path> <schema.sql>\n  check <db-path> <schema.sql>\n  apply <db-path> <schema.sql>"
     );
 }
 

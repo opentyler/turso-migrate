@@ -307,6 +307,7 @@ turso-converge is designed to be safe by default:
 Development and CI workflow commands:
 
 ```bash
+turso-converge dump     my.db                # Extract schema SQL from existing DB
 turso-converge validate schema.sql           # Validate syntax against in-memory DB
 turso-converge diff     my.db schema.sql     # Human-readable diff
 turso-converge plan     my.db schema.sql     # Show migration SQL (dry-run)
@@ -314,7 +315,7 @@ turso-converge check    my.db schema.sql     # Exit 0 if converged, 1 if not
 turso-converge apply    my.db schema.sql     # Apply convergence
 ```
 
-`check` is designed for CI gates — it prints the migration plan and exits non-zero if the schema is not converged.
+`dump` is the bootstrapping entry point — extract your existing database's schema to start using turso-converge. `check` is designed for CI gates — exits non-zero if the schema is not converged.
 
 ## Error Types
 

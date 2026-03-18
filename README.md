@@ -479,6 +479,7 @@ cargo test
 The crate now ships a small CLI for development/CI workflows:
 
 ```bash
+turso-converge dump data/user.db                            # Extract schema SQL from existing DB
 turso-converge validate schemas/turso_schema.sql
 turso-converge diff data/user.db schemas/turso_schema.sql
 turso-converge plan data/user.db schemas/turso_schema.sql
