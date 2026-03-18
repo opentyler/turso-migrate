@@ -13,8 +13,8 @@ use turso_converge::execute::execute_plan;
 use turso_converge::plan::generate_plan;
 use turso_converge::{
     CIString, ConnectionLike, ConvergeMode, ConvergeOptions, ConvergePolicy, DataMigration,
-    Failpoint, MigrateError, SchemaSnapshot, compute_diff, converge, converge_like_with_options,
-    converge_with_options,
+    DestructiveChangeSet, Failpoint, MigrateError, SchemaSnapshot, compute_diff, converge,
+    converge_like_with_options, converge_with_options, schema_version,
 };
 
 // ── ConvergePolicy edge cases ──────────────────────────────────────
@@ -651,4 +651,349 @@ async fn capabilities_detect_fts_and_materialized_views() {
     );
     assert!(caps.supports_drop_column, "Should support DROP COLUMN");
     assert!(caps.supports_rename_column, "Should support RENAME COLUMN");
+}
+
+// ── UnsupportedFeature error path ──────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_fts_returns_error() {
+    let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+    let conn = db.connect().unwrap();
+
+    let schema = "\
+        CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT);\n\
+        CREATE INDEX idx_fts ON docs USING fts (title);";
+
+    let err = converge(&conn, schema).await.unwrap_err();
+    match err {
+        MigrateError::UnsupportedFeature(msg) => {
+            assert!(msg.contains("FTS"), "Should mention FTS: {msg}");
+        }
+        other => panic!("expected UnsupportedFeature, got: {other:?}"),
+    }
+}
+
+// ── NoOp mode (hash mismatch, no actual changes) ──────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn noop_mode_when_hash_mismatches_but_schema_matches() {
+    let (_db, conn) = common::empty_db().await;
+    let schema = "CREATE TABLE foo (id TEXT PRIMARY KEY, val TEXT);\n\
+                  CREATE TABLE schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL);";
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        ..Default::default()
+    };
+    converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap();
+
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('schema_hash', 'stale')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let report = converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.mode,
+        ConvergeMode::NoOp,
+        "Hash mismatch but no actual changes should produce NoOp"
+    );
+    assert!(!report.had_changes());
+}
+
+// ── validate_schema with empty string ──────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_schema_empty_string_errors() {
+    use turso_converge::validate_schema;
+    let err = validate_schema("").await.unwrap_err();
+    match err {
+        MigrateError::Schema(msg) => assert!(msg.contains("empty")),
+        other => panic!("expected Schema error, got: {other:?}"),
+    }
+}
+
+// ── Backup to explicit file path ───────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_to_explicit_file_path() {
+    let (_db, conn) = common::empty_db().await;
+    converge(&conn, common::test_schema()).await.unwrap();
+
+    conn.execute("CREATE TABLE extra (id TEXT PRIMARY KEY)", ())
+        .await
+        .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('schema_hash', 'force')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let explicit_path = dir.path().join("my_backup.sql");
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        backup_before_destructive: Some(explicit_path.clone()),
+        ..Default::default()
+    };
+    converge_with_options(&conn, common::test_schema(), &options)
+        .await
+        .unwrap();
+
+    assert!(
+        explicit_path.exists(),
+        "Backup file should exist at exact path"
+    );
+    let contents = std::fs::read_to_string(&explicit_path).unwrap();
+    assert!(contents.contains("CREATE TABLE"));
+}
+
+// ── Lease cleanup after convergence ────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lease_cleaned_up_after_convergence() {
+    let (_db, conn) = common::empty_db().await;
+    let schema = "CREATE TABLE foo (id TEXT PRIMARY KEY);\n\
+                  CREATE TABLE schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL);";
+    converge(&conn, schema).await.unwrap();
+
+    let owner = common::get_meta(&conn, "migration_owner").await;
+    let lease_until = common::get_meta(&conn, "migration_lease_until").await;
+    assert!(
+        owner.is_none(),
+        "migration_owner should be cleared: {owner:?}"
+    );
+    assert!(
+        lease_until.is_none(),
+        "migration_lease_until should be cleared: {lease_until:?}"
+    );
+}
+
+// ── Multiple data migrations with mixed state ──────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multiple_data_migrations_partially_applied() {
+    let (_db, conn) = common::empty_db().await;
+    let schema = "CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL);";
+
+    let first_run = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        data_migrations: vec![DataMigration {
+            id: "seed-alice".to_string(),
+            statements: vec!["INSERT INTO users VALUES ('a', 'alice')".to_string()],
+        }],
+        ..Default::default()
+    };
+    let r1 = converge_with_options(&conn, schema, &first_run)
+        .await
+        .unwrap();
+    assert_eq!(r1.data_migrations_applied, 1);
+
+    let second_run = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        data_migrations: vec![
+            DataMigration {
+                id: "seed-alice".to_string(),
+                statements: vec!["INSERT INTO users VALUES ('a', 'alice')".to_string()],
+            },
+            DataMigration {
+                id: "seed-bob".to_string(),
+                statements: vec!["INSERT INTO users VALUES ('b', 'bob')".to_string()],
+            },
+        ],
+        ..Default::default()
+    };
+    let r2 = converge_with_options(&conn, schema, &second_run)
+        .await
+        .unwrap();
+    assert_eq!(
+        r2.data_migrations_applied, 1,
+        "Only seed-bob should be applied"
+    );
+
+    let mut rows = conn.query("SELECT COUNT(*) FROM users", ()).await.unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let count: i64 = row.get(0).unwrap();
+    assert_eq!(count, 2);
+}
+
+// ── schema_version on fresh DB ─────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_version_returns_error_on_fresh_db() {
+    let (_db, conn) = common::empty_db().await;
+    let result = schema_version(&conn).await;
+    assert!(
+        result.is_err(),
+        "schema_version on fresh DB (no table) should error"
+    );
+}
+
+// ── plan_sql empty for non-dry-run ─────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_path_report_has_empty_plan_sql() {
+    let (_db, conn) = common::empty_db().await;
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        ..Default::default()
+    };
+    let report = converge_with_options(&conn, common::test_schema(), &options)
+        .await
+        .unwrap();
+    assert_eq!(report.mode, ConvergeMode::SlowPath);
+    assert!(
+        report.plan_sql.is_empty(),
+        "Non-dry-run should have empty plan_sql"
+    );
+}
+
+// ── DestructiveChangeSet methods ───────────────────────────────────
+
+#[test]
+fn destructive_change_set_has_changes() {
+    let empty = DestructiveChangeSet {
+        tables_to_drop: vec![],
+        columns_to_drop: vec![],
+        tables_to_rebuild: vec![],
+    };
+    assert!(!empty.has_changes());
+
+    let with_drop = DestructiveChangeSet {
+        tables_to_drop: vec!["foo".to_string()],
+        columns_to_drop: vec![],
+        tables_to_rebuild: vec![],
+    };
+    assert!(with_drop.has_changes());
+}
+
+#[test]
+fn destructive_change_set_blocked_operations() {
+    let changes = DestructiveChangeSet {
+        tables_to_drop: vec!["users".to_string()],
+        columns_to_drop: vec![("posts".to_string(), "legacy".to_string())],
+        tables_to_rebuild: vec!["items".to_string()],
+    };
+    let ops = changes.blocked_operations();
+    assert!(ops.iter().any(|o| o.contains("DROP TABLE")));
+    assert!(ops.iter().any(|o| o.contains("DROP COLUMN")));
+    assert!(ops.iter().any(|o| o.contains("REBUILD")));
+}
+
+// ── SchemaSnapshot lookup methods edge cases ───────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_get_methods_return_none_for_missing() {
+    let snap = SchemaSnapshot::from_schema_sql("CREATE TABLE foo (id TEXT PRIMARY KEY);")
+        .await
+        .unwrap();
+    assert!(snap.get_table("nonexistent").is_none());
+    assert!(snap.get_index("nonexistent").is_none());
+    assert!(snap.get_view("nonexistent").is_none());
+    assert!(snap.get_trigger("nonexistent").is_none());
+    assert!(!snap.has_table("nonexistent"));
+    assert!(!snap.has_index("nonexistent"));
+    assert!(!snap.has_view("nonexistent"));
+    assert!(!snap.has_trigger("nonexistent"));
+}
+
+// ── Functional verification: data survives full convergence cycle ──
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_convergence_cycle_preserves_data_integrity() {
+    let (_db, conn) = common::empty_db().await;
+    let schema = "\
+        CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT);\n\
+        CREATE TABLE posts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL);\n\
+        CREATE INDEX idx_posts_user ON posts(user_id);\n\
+        CREATE TABLE schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL);";
+
+    converge(&conn, schema).await.unwrap();
+
+    conn.execute(
+        "INSERT INTO users VALUES ('u1', 'Alice', 'alice@test.com')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("INSERT INTO users VALUES ('u2', 'Bob', 'bob@test.com')", ())
+        .await
+        .unwrap();
+    conn.execute("INSERT INTO posts VALUES ('p1', 'u1', 'Hello World')", ())
+        .await
+        .unwrap();
+
+    let schema_v2 = "\
+        CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT, bio TEXT);\n\
+        CREATE TABLE posts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL);\n\
+        CREATE INDEX idx_posts_user ON posts(user_id);\n\
+        CREATE TABLE schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL);";
+
+    converge(&conn, schema_v2).await.unwrap();
+
+    let mut user_rows = conn
+        .query("SELECT id, name, email FROM users ORDER BY id", ())
+        .await
+        .unwrap();
+    let u1 = user_rows.next().await.unwrap().unwrap();
+    assert_eq!(u1.get::<String>(0).unwrap(), "u1");
+    assert_eq!(u1.get::<String>(1).unwrap(), "Alice");
+    assert_eq!(u1.get::<String>(2).unwrap(), "alice@test.com");
+    let u2 = user_rows.next().await.unwrap().unwrap();
+    assert_eq!(u2.get::<String>(0).unwrap(), "u2");
+
+    let mut post_rows = conn
+        .query("SELECT id, user_id, title FROM posts", ())
+        .await
+        .unwrap();
+    let p1 = post_rows.next().await.unwrap().unwrap();
+    assert_eq!(p1.get::<String>(0).unwrap(), "p1");
+    assert_eq!(p1.get::<String>(1).unwrap(), "u1");
+    assert_eq!(p1.get::<String>(2).unwrap(), "Hello World");
+
+    let v = schema_version(&conn).await.unwrap();
+    assert_eq!(v, 2, "Two DDL convergences = version 2");
+}
+
+// ── Index functionality after convergence ──────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn index_actually_works_after_convergence() {
+    let (_db, conn) = common::empty_db().await;
+    let schema = "\
+        CREATE TABLE items (id TEXT PRIMARY KEY, category TEXT NOT NULL);\n\
+        CREATE INDEX idx_items_cat ON items(category);\n\
+        CREATE TABLE schema_version (version INTEGER NOT NULL, updated_at TEXT NOT NULL);";
+
+    converge(&conn, schema).await.unwrap();
+
+    for i in 0..100 {
+        conn.execute(
+            &format!("INSERT INTO items VALUES ('id_{i}', 'cat_{}')", i % 5),
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut rows = conn
+        .query(
+            "EXPLAIN QUERY PLAN SELECT * FROM items WHERE category = 'cat_0'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let detail: String = row.get(3).unwrap();
+    assert!(
+        detail.to_lowercase().contains("index") || detail.to_lowercase().contains("idx_items_cat"),
+        "Query should use index: {detail}"
+    );
 }
