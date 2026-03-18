@@ -1,9 +1,20 @@
 # turso-migrate Production Readiness Review
 
-**Date**: 2026-03-17
+**Date**: 2026-03-18
 **Reviewer**: Automated multi-agent review (Sisyphus + Oracle)
 **Codebase**: turso-migrate v0.1.0 @ main
-**Test Baseline**: 113 tests, all passing
+**Test Baseline**: 117 tests, all passing
+
+## Final Hardening Pass (2026-03-18)
+
+Final blocker fixes were completed after the initial remediation pass:
+
+- ✅ **Atomic lease refresh guard** — `verify_and_refresh_lease` now performs a single guarded `UPDATE` (owner must match and lease must be unexpired) and fails hard if refresh cannot be applied.
+- ✅ **No silent lease refresh failures** — lease refresh write errors now abort migration instead of being ignored.
+- ✅ **Probe artifact isolation** — `_cap_probe_*` objects are now treated as internal and excluded from snapshots/diffs.
+- ✅ **Regression coverage** — added tests for owner mismatch lease rejection, expired lease rejection, and `_cap_probe_*` filtering behavior.
+
+Post-fix independent Oracle review: **GO** for production readiness.
 
 ## Remediation Status (2026-03-17)
 
@@ -302,10 +313,13 @@ Called from `increment_schema_version()` with `unwrap_or(0)` which masks the rea
 
 ## Test Summary
 
-Current validated baseline on `main`: **113 tests passing** (`cargo test --jobs 1`), including added regressions for:
+Current validated baseline on `main`: **117 tests passing** (`cargo test --jobs 1`), including added regressions for:
 
 - pre-DDL vs post-DDL failpoint cleanup semantics,
 - `schema_version` overflow hardening,
 - defensive rebuild temp-table cleanup,
 - CLI local connection trigger DDL support,
-- robust view/trigger CREATE classification.
+- robust view/trigger CREATE classification,
+- lease owner mismatch rejection,
+- expired lease rejection,
+- `_cap_probe_*` snapshot filtering.

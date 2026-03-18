@@ -330,7 +330,7 @@ Adding a `NOT NULL` column without a `DEFAULT` value to an existing table is cau
 Even when the desired schema hash matches, turso-migrate checks `PRAGMA schema_version` to detect out-of-band changes (manual SQL, admin operations, replica divergence). If drift is detected, it forces a full convergence to correct the database.
 
 ### Migration Lease (Concurrency Protection)
-Only one migration runs at a time per database. `converge_with_options` acquires a cooperative lease in `_schema_meta` (owner + TTL) before entering the slow path. If another process holds the lease, the caller gets `MigrateError::MigrationBusy` with the owner and time remaining. The lease expires automatically after 5 minutes (crash recovery). Phase tracking (`migration_phase`) records progress for unambiguous crash recovery.
+Only one migration runs at a time per database. `converge_with_options` acquires a cooperative lease in `_schema_meta` (owner + TTL) before entering the slow path. If another process holds the lease, the caller gets `MigrateError::MigrationBusy` with the owner and time remaining. The lease expires automatically after 5 minutes (crash recovery). Before each execution phase transition, turso-migrate performs an atomic guarded lease refresh (owner must still match and lease must still be unexpired), and aborts immediately if the lease is lost.
 
 ### Crash Recovery
 If a migration is interrupted, the `migration_in_progress` flag and phase cursor force a full re-convergence on the next connection. Internal temp tables (`_converge_new_*`) are filtered from introspection to prevent crash artifacts from corrupting the diff.
@@ -339,7 +339,7 @@ If a migration is interrupted, the `migration_in_progress` flag and phase cursor
 Hash, schema version, and the in-progress flag are updated in a single `BEGIN IMMEDIATE` / `COMMIT` transaction. A crash between these updates is impossible.
 
 ### Protected Table Namespace
-Internal tables (`_schema_meta`, `_converge_new_*`, `sqlite_*`, etc.) are never dropped by the migration planner, even if they appear in the diff.
+Internal tables (`_schema_meta`, `_converge_new_*`, `_cap_probe_*`, `sqlite_*`, etc.) are never dropped by the migration planner, even if they appear in the diff.
 
 ### AUTOINCREMENT Preservation
 Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT counters aren't reset.
@@ -367,7 +367,7 @@ Table rebuilds save and restore `sqlite_sequence` values so that AUTOINCREMENT c
 | UNIQUE constraints | ✅ (via PRAGMA index_list) |
 | ADD COLUMN (nullable or with DEFAULT) | ✅ (O(1), no rebuild) |
 | DROP COLUMN (eligible columns) | ✅ (O(1) when not PK/indexed/FK-referenced/view-referenced) |
-| Feature preflight validation | ✅ (FTS, vector, materialized view checks) |
+| Feature preflight validation | ✅ (runtime capability probes for FTS, vector, materialized view) |
 | Migration lease (concurrency) | ✅ (cooperative lease in _schema_meta) |
 | Destructive change protection | ✅ (ConvergePolicy) |
 | Dry-run mode | ✅ (plan without executing) |
@@ -470,7 +470,7 @@ This means:
 cargo test
 ```
 
-113 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
+117 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
 
 ## CLI
 
