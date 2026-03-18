@@ -72,40 +72,38 @@ async fn verify_and_refresh_lease(
         return Ok(());
     }
 
-    let owner = conn
-        .query(
-            "SELECT value FROM _schema_meta WHERE key = 'migration_owner'",
-            (),
-        )
-        .await;
-
-    let current_owner = match owner {
-        Ok(mut rows) => match rows.next().await {
-            Ok(Some(row)) => row.get::<String>(0).ok(),
-            _ => None,
-        },
-        Err(_) => None,
-    };
-
-    if current_owner.as_deref() != Some(lease_id) {
-        return Err(MigrateError::Schema(
-            "Migration lease was stolen by another process between execution phases. \
-             Aborting to prevent concurrent DDL corruption."
-                .to_string(),
-        ));
-    }
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let new_expiry = now + 300;
-    let _ = conn
+    let new_expiry = now.saturating_add(300);
+
+    let updated = conn
         .execute(
-            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('migration_lease_until', ?1)",
-            [new_expiry.to_string().as_str()],
+            "UPDATE _schema_meta
+             SET value = ?1
+             WHERE key = 'migration_lease_until'
+               AND CAST(value AS INTEGER) > ?2
+               AND EXISTS (
+                   SELECT 1 FROM _schema_meta owner
+                   WHERE owner.key = 'migration_owner' AND owner.value = ?3
+               )",
+            (new_expiry as i64, now as i64, lease_id),
         )
-        .await;
+        .await
+        .map_err(|e| {
+            MigrateError::Schema(format!(
+                "Failed to refresh migration lease before next phase: {e}"
+            ))
+        })?;
+
+    if updated == 0 {
+        return Err(MigrateError::Schema(
+            "Migration lease was lost or expired between execution phases. \
+             Aborting to prevent concurrent DDL corruption."
+                .to_string(),
+        ));
+    }
 
     Ok(())
 }

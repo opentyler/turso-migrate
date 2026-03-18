@@ -191,3 +191,32 @@ async fn snapshot_cache_reuses_normalized_schema_hash() {
         "format/comment-only variants should reuse the same cache entry"
     );
 }
+
+#[tokio::test]
+async fn snapshot_filters_capability_probe_artifacts() {
+    let db = turso::Builder::new_local(":memory:")
+        .experimental_index_method(true)
+        .experimental_materialized_views(true)
+        .experimental_triggers(true)
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+
+    conn.execute("CREATE TABLE _cap_probe_fts (x TEXT)", ())
+        .await
+        .unwrap();
+    conn.execute("CREATE TABLE _cap_probe_vec (x TEXT)", ())
+        .await
+        .unwrap();
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(
+        !snap.has_table("_cap_probe_fts"),
+        "_cap_probe_fts must be hidden from snapshots"
+    );
+    assert!(
+        !snap.has_table("_cap_probe_vec"),
+        "_cap_probe_vec must be hidden from snapshots"
+    );
+}

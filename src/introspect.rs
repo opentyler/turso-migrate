@@ -384,6 +384,7 @@ fn is_internal_object(name: &str) -> bool {
     lower.starts_with("sqlite_")
         || lower.starts_with("fts_dir_")
         || lower.starts_with("__turso_internal")
+        || lower.starts_with("_cap_probe_")
         || lower.starts_with("sqlite_autoindex_")
         || lower == "_schema_meta"
         || lower == "_turso_migrations"

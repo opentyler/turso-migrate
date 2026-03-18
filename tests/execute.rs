@@ -1,6 +1,8 @@
-use turso_migrate::execute::execute_plan;
+use std::time::Duration;
+
+use turso_migrate::execute::{execute_plan, execute_plan_with_timeout};
 use turso_migrate::plan::generate_plan;
-use turso_migrate::{SchemaSnapshot, compute_diff};
+use turso_migrate::{MigrationPlan, SchemaSnapshot, compute_diff};
 
 fn test_schema() -> &'static str {
     include_str!("fixtures/schema.sql")
@@ -15,6 +17,20 @@ async fn empty_db() -> (turso::Database, turso::Connection) {
         .unwrap();
     let conn = db.connect().unwrap();
     (db, conn)
+}
+
+fn non_transactional_plan(stmt: &str) -> MigrationPlan {
+    MigrationPlan {
+        new_tables: Vec::new(),
+        altered_tables: Vec::new(),
+        rebuilt_tables: Vec::new(),
+        new_indexes: Vec::new(),
+        changed_indexes: Vec::new(),
+        new_views: Vec::new(),
+        changed_views: Vec::new(),
+        transactional_stmts: Vec::new(),
+        non_transactional_stmts: vec![stmt.to_string()],
+    }
 }
 
 #[tokio::test]
@@ -576,4 +592,82 @@ async fn rebuild_handles_if_not_exists_in_create_table() {
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert!(snap.has_table("items"), "table should survive rebuild");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_plan_rejects_when_lease_owner_mismatch() {
+    let (_db, conn) = empty_db().await;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('migration_owner', 'owner-a')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('migration_lease_until', '4102444800')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let plan = non_transactional_plan("CREATE TABLE lease_guard_mismatch (id INTEGER)");
+    let err = execute_plan_with_timeout(&conn, &plan, Duration::from_secs(1), "owner-b")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("lease was lost or expired"),
+        "unexpected error: {err}"
+    );
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(
+        !snap.has_table("lease_guard_mismatch"),
+        "non-transactional phase should not run when lease check fails"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_plan_rejects_when_lease_is_expired() {
+    let (_db, conn) = empty_db().await;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('migration_owner', 'owner-a')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('migration_lease_until', '1')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let plan = non_transactional_plan("CREATE TABLE lease_guard_expired (id INTEGER)");
+    let err = execute_plan_with_timeout(&conn, &plan, Duration::from_secs(1), "owner-a")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("lease was lost or expired"),
+        "unexpected error: {err}"
+    );
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(
+        !snap.has_table("lease_guard_expired"),
+        "non-transactional phase should not run when lease has expired"
+    );
 }
