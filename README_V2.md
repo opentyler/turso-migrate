@@ -114,6 +114,44 @@ match report.mode {
 }
 ```
 
+### `ConvergeOptions`
+
+```rust
+use std::time::Duration;
+use turso_converge::ConvergeOptions;
+
+let options = ConvergeOptions {
+    policy: ConvergePolicy::default(),      // Safe: blocks destructive changes
+    dry_run: false,                         // Set true to preview without executing
+    busy_timeout: Duration::from_secs(5),   // PRAGMA busy_timeout
+    max_retries: 3,
+    backup_before_destructive: None,        // Optional file/dir path for pre-DDL SQL backup
+    data_migrations: vec![],                // Optional idempotent data migration steps
+    rename_hints: vec![],                   // Optional explicit column rename hints
+    pre_destructive_hook: None,             // Optional callback gate before destructive changes
+    failpoint: None,                        // Test-only crash injection selector
+};
+```
+
+### `ConvergeReport`
+
+```rust
+pub struct ConvergeReport {
+    pub mode: ConvergeMode,        // FastPath | SlowPath | DryRun | CrashRecovery | NoOp
+    pub tables_created: usize,
+    pub tables_rebuilt: usize,
+    pub tables_dropped: usize,
+    pub columns_added: usize,
+    pub columns_dropped: usize,
+    pub columns_renamed: usize,
+    pub indexes_changed: usize,
+    pub views_changed: usize,
+    pub data_migrations_applied: usize,
+    pub duration: Duration,
+    pub plan_sql: Vec<String>,     // Populated in dry-run mode only
+}
+```
+
 ### Dry Run — Preview Without Executing
 
 ```rust
@@ -334,6 +372,18 @@ All operations return `Result<_, MigrateError>`:
 | `Turso(err)` | Underlying database error |
 | `Io` | File I/O error (converge_from_path, backup) |
 | `InjectedFailure` | Test-only failpoint (never in production) |
+
+## Known Limitations
+
+**Rename detection is conservative.** Automatic rename detection only applies when there is an unambiguous 1:1 match (same type, constraints, ordinal position). Use `ColumnRenameHint` for ambiguous renames.
+
+**Table rebuilds copy all rows.** Large tables take proportional time.
+
+**Rollback is single-step.** `rollback_to_previous` restores the most recent prior schema, not arbitrary history.
+
+**WITHOUT ROWID and GENERATED columns are not supported by Turso** (as of 3.50.4). turso-converge includes introspection support for future compatibility, but these features will fail at the Turso parser level.
+
+**FTS, triggers, and materialized views require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`.
 
 ## Tests
 
