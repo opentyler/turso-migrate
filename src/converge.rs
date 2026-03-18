@@ -146,6 +146,7 @@ async fn run_slow_path(
 
         if options.dry_run {
             tracing::info!("converge: dry-run mode, skipping execution");
+            clear_migration_markers(conn).await?;
             let mut all_stmts = plan.transactional_stmts.clone();
             all_stmts.extend(plan.non_transactional_stmts.clone());
             return Ok(ConvergeReport {
@@ -365,6 +366,12 @@ async fn release_lease(conn: &turso::Connection, lease_id: &str) {
     }
 }
 
+async fn clear_migration_markers(conn: &turso::Connection) -> Result<(), MigrateError> {
+    delete_meta(conn, "migration_in_progress").await?;
+    delete_meta(conn, "migration_phase").await?;
+    Ok(())
+}
+
 async fn maybe_cleanup_pre_ddl_failure(
     conn: &turso::Connection,
     lease_id: &str,
@@ -384,12 +391,7 @@ async fn maybe_cleanup_pre_ddl_failure(
         return;
     }
 
-    let cleanup_result = async {
-        delete_meta(conn, "migration_in_progress").await?;
-        delete_meta(conn, "migration_phase").await?;
-        Ok::<(), MigrateError>(())
-    }
-    .await;
+    let cleanup_result = clear_migration_markers(conn).await;
 
     if cleanup_result.is_err() {
         let _ = conn.execute("ROLLBACK", ()).await;
@@ -470,8 +472,7 @@ async fn update_state_atomically(
 
     if let Err(e) = async {
         set_meta(conn, "schema_hash", schema_hash).await?;
-        delete_meta(conn, "migration_in_progress").await?;
-        delete_meta(conn, "migration_phase").await?;
+        clear_migration_markers(conn).await?;
 
         if had_ddl {
             increment_schema_version(conn).await?;

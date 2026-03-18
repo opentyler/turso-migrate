@@ -302,17 +302,10 @@ Called from `increment_schema_version()` with `unwrap_or(0)` which masks the rea
 
 ## Test Summary
 
-| Category | Before | After | Delta |
-|----------|--------|-------|-------|
-| Unit tests (lib) | 0 | 54 | +54 |
-| Bridge tests | 4 | 4 | 0 |
-| Converge tests | 9 | 9 | 0 |
-| Data migration tests | 3 | 3 | 0 |
-| Diff tests | 12 | 12 | 0 |
-| Edge case tests | 0 | 16 | +16 |
-| Execute tests | 11 | 11 | 0 |
-| Introspect tests | 8 | 8 | 0 |
-| Migrator tests | 4 | 4 | 0 |
-| New API tests | 10 | 10 | 0 |
-| Trigger tests | 0 | 8 | +8 |
-| **Total** | **61** | **139** | **+78** |
+Current validated baseline on `main`: **113 tests passing** (`cargo test --jobs 1`), including added regressions for:
+
+- pre-DDL vs post-DDL failpoint cleanup semantics,
+- `schema_version` overflow hardening,
+- defensive rebuild temp-table cleanup,
+- CLI local connection trigger DDL support,
+- robust view/trigger CREATE classification.

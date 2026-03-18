@@ -243,6 +243,17 @@ async fn dry_run_returns_plan_without_executing() {
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert!(snap.tables.is_empty(), "Dry-run should NOT execute DDL");
+
+    let in_progress = get_meta(&conn, "migration_in_progress").await;
+    let phase = get_meta(&conn, "migration_phase").await;
+    assert!(
+        in_progress.is_none(),
+        "Dry-run should not leave migration_in_progress set"
+    );
+    assert!(
+        phase.is_none(),
+        "Dry-run should not leave migration_phase set"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
