@@ -12,9 +12,9 @@ use turso_converge::diff::normalize_for_hash;
 use turso_converge::execute::execute_plan;
 use turso_converge::plan::generate_plan;
 use turso_converge::{
-    CIString, ConnectionLike, ConvergeMode, ConvergeOptions, ConvergePolicy, DataMigration,
-    DestructiveChangeSet, Failpoint, MigrateError, SchemaSnapshot, compute_diff, converge,
-    converge_like_with_options, converge_with_options, schema_version,
+    CIString, Capabilities, ConnectionLike, ConvergeMode, ConvergeOptions, ConvergePolicy,
+    DataMigration, DestructiveChangeSet, Failpoint, MigrateError, SchemaSnapshot, compute_diff,
+    converge, converge_like_with_options, converge_with_options, schema_version,
 };
 
 // ── ConvergePolicy edge cases ──────────────────────────────────────
@@ -513,7 +513,7 @@ fn cistring_btreemap_lookup_is_case_insensitive() {
     assert_eq!(map.get(&CIString::new("USERS")), Some(&"found"));
 }
 
-// ── dump CLI command ───────────────────────────────────────────────
+// ── extract CLI command ────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dump_output_round_trips_through_converge() {
@@ -996,4 +996,173 @@ async fn index_actually_works_after_convergence() {
         detail.to_lowercase().contains("index") || detail.to_lowercase().contains("idx_items_cat"),
         "Query should use index: {detail}"
     );
+}
+
+// ── Capability validation: WITHOUT ROWID ───────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_without_rowid_returns_error() {
+    let (_db, conn) = common::empty_db().await;
+    let schema = "CREATE TABLE wr (id INTEGER PRIMARY KEY) WITHOUT ROWID;";
+    let mut caps = Capabilities::detect(&conn).await.unwrap();
+    caps.supports_without_rowid = false;
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        capabilities: Some(caps),
+        ..Default::default()
+    };
+    let err = converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap_err();
+    match err {
+        MigrateError::UnsupportedFeature(msg) => {
+            assert!(
+                msg.contains("WITHOUT ROWID"),
+                "Should mention WITHOUT ROWID: {msg}"
+            );
+        }
+        other => panic!("expected UnsupportedFeature, got: {other:?}"),
+    }
+}
+
+// ── Capability validation: GENERATED columns ───────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_generated_returns_error() {
+    let (_db, conn) = common::empty_db().await;
+    let schema =
+        "CREATE TABLE gen (x INTEGER, y INTEGER GENERATED ALWAYS AS (x * 2) STORED);";
+    let mut caps = Capabilities::detect(&conn).await.unwrap();
+    caps.supports_generated_columns = false;
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        capabilities: Some(caps),
+        ..Default::default()
+    };
+    let err = converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap_err();
+    match err {
+        MigrateError::UnsupportedFeature(msg) => {
+            assert!(
+                msg.contains("GENERATED"),
+                "Should mention GENERATED: {msg}"
+            );
+        }
+        other => panic!("expected UnsupportedFeature, got: {other:?}"),
+    }
+}
+
+// ── Capability validation: triggers ────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_triggers_returns_error() {
+    let db = turso::Builder::new_local(":memory:")
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+
+    let schema = "\
+        CREATE TABLE users (id TEXT PRIMARY KEY);\n\
+        CREATE TRIGGER trg_ins AFTER INSERT ON users BEGIN SELECT 1; END;";
+
+    let err = converge(&conn, schema).await.unwrap_err();
+    match err {
+        MigrateError::UnsupportedFeature(msg) => {
+            assert!(
+                msg.to_lowercase().contains("trigger"),
+                "Should mention triggers: {msg}"
+            );
+        }
+        other => panic!("expected UnsupportedFeature, got: {other:?}"),
+    }
+}
+
+// ── Capability detection: new fields ───────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capabilities_detect_triggers_and_engine_features() {
+    let (_db, conn) = common::empty_db().await;
+    let caps = Capabilities::detect(&conn).await.unwrap();
+    assert!(
+        caps.has_triggers,
+        "Test DB (all experimental flags) should have trigger support"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capabilities_detect_triggers_disabled_without_flag() {
+    let db = turso::Builder::new_local(":memory:")
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    let caps = Capabilities::detect(&conn).await.unwrap();
+    assert!(
+        !caps.has_triggers,
+        "DB without experimental_triggers flag should not have trigger support"
+    );
+}
+
+// ── Capabilities override in ConvergeOptions ───────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capabilities_override_skips_detection() {
+    let (_db, conn) = common::empty_db().await;
+    let schema = "\
+        CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT);\n\
+        CREATE INDEX idx_fts ON docs USING fts (title);";
+
+    let caps = Capabilities {
+        has_fts_module: false,
+        ..Capabilities::default()
+    };
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        capabilities: Some(caps),
+        ..Default::default()
+    };
+
+    let err = converge_with_options(&conn, schema, &options)
+        .await
+        .unwrap_err();
+    match err {
+        MigrateError::UnsupportedFeature(msg) => {
+            assert!(msg.contains("FTS"), "Should mention FTS: {msg}");
+        }
+        other => panic!(
+            "Override should block FTS even on capable DB, got: {other:?}"
+        ),
+    }
+}
+
+// ── Table rebuild row count logging ────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_with_data_succeeds() {
+    let (_db, conn) = common::empty_db().await;
+    let v1 = "CREATE TABLE items (id TEXT PRIMARY KEY, val TEXT);";
+    converge(&conn, v1).await.unwrap();
+    conn.execute("INSERT INTO items VALUES ('1', 'a')", ())
+        .await
+        .unwrap();
+    conn.execute("INSERT INTO items VALUES ('2', 'b')", ())
+        .await
+        .unwrap();
+
+    let v2 = "CREATE TABLE items (id TEXT PRIMARY KEY, val INTEGER);";
+    conn.execute(
+        "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('schema_hash', 'force')",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let options = ConvergeOptions {
+        policy: ConvergePolicy::permissive(),
+        ..Default::default()
+    };
+    let report = converge_with_options(&conn, v2, &options).await.unwrap();
+    assert_eq!(report.tables_rebuilt, 1);
 }

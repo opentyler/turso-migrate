@@ -118,6 +118,10 @@ pub struct ConvergeOptions {
     pub rename_hints: Vec<ColumnRenameHint>,
     pub pre_destructive_hook: Option<PreDestructiveHook>,
     pub failpoint: Option<Failpoint>,
+    /// Pre-detected capabilities to skip runtime probing.
+    /// When `None` (default), capabilities are auto-detected via `Capabilities::detect()`.
+    /// When `Some`, the provided capabilities are used directly, skipping all probes.
+    pub capabilities: Option<crate::schema::Capabilities>,
 }
 
 impl fmt::Debug for ConvergeOptions {
@@ -135,6 +139,7 @@ impl fmt::Debug for ConvergeOptions {
                 &self.pre_destructive_hook.as_ref().map(|_| "<hook>"),
             )
             .field("failpoint", &self.failpoint)
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }
@@ -151,6 +156,7 @@ impl Default for ConvergeOptions {
             rename_hints: Vec::new(),
             pre_destructive_hook: None,
             failpoint: None,
+            capabilities: None,
         }
     }
 }

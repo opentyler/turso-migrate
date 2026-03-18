@@ -209,6 +209,12 @@ pub struct Capabilities {
     pub has_vector_module: bool,
     /// Whether MATERIALIZED VIEW is supported.
     pub has_materialized_views: bool,
+    /// Whether WITHOUT ROWID tables are supported.
+    pub supports_without_rowid: bool,
+    /// Whether GENERATED ALWAYS AS columns are supported.
+    pub supports_generated_columns: bool,
+    /// Whether triggers are supported (requires `.experimental_triggers(true)` on Turso).
+    pub has_triggers: bool,
 }
 
 impl Default for Capabilities {
@@ -220,6 +226,9 @@ impl Default for Capabilities {
             has_fts_module: false,
             has_vector_module: false,
             has_materialized_views: false,
+            supports_without_rowid: false,
+            supports_generated_columns: false,
+            has_triggers: false,
         }
     }
 }

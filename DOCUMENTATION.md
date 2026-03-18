@@ -79,7 +79,7 @@
   - [Pre-Destructive Hook](#pre-destructive-hook)
   - [Read-Only Guard](#read-only-guard)
 - [CLI Reference](#cli-reference)
-  - [dump](#cli-dump)
+  - [extract](#cli-extract)
   - [validate](#cli-validate)
   - [diff](#cli-diff)
   - [plan](#cli-plan)
@@ -206,7 +206,7 @@ Traditional migration systems require developers to write imperative migration s
 
 ```
 Traditional migrations:           Declarative convergence:
-001_create_users.sql             turso_schema.sql (desired state)
+001_create_users.sql             schema.sql (desired state)
 002_add_email_column.sql              ↓
 003_create_posts.sql             converge() — library computes diff
 004_add_index.sql                     ↓
@@ -295,7 +295,7 @@ The simplest entry point. Converges the database to match `schema_sql` using a *
 
 **Example:**
 ```rust
-let schema = include_str!("../turso_schema.sql");
+let schema = include_str!("../schema.sql");
 turso_converge::converge(&conn, schema).await?;
 ```
 
@@ -369,7 +369,7 @@ Reads schema SQL from a file on disk, then converges using the permissive policy
 
 **Example:**
 ```rust
-turso_converge::converge_from_path(&conn, "schemas/turso_schema.sql").await?;
+turso_converge::converge_from_path(&conn, "schemas/schema.sql").await?;
 ```
 
 **Source:** [`src/converge.rs:561-573`](src/converge.rs)
@@ -436,7 +436,7 @@ Validates schema SQL by executing it against an in-memory Turso database. Does n
 
 **Example:**
 ```rust
-turso_converge::validate_schema(include_str!("../turso_schema.sql")).await?;
+turso_converge::validate_schema(include_str!("../schema.sql")).await?;
 ```
 
 **Source:** [`src/converge.rs:521-528`](src/converge.rs)
@@ -550,6 +550,7 @@ pub struct ConvergeOptions {
     pub rename_hints: Vec<ColumnRenameHint>,
     pub pre_destructive_hook: Option<PreDestructiveHook>,
     pub failpoint: Option<Failpoint>,
+    pub capabilities: Option<Capabilities>,
 }
 ```
 
@@ -564,6 +565,7 @@ pub struct ConvergeOptions {
 | `rename_hints` | `Vec<ColumnRenameHint>` | `vec![]` | Explicit hints for column rename detection when heuristics are ambiguous. |
 | `pre_destructive_hook` | `Option<PreDestructiveHook>` | `None` | Callback invoked before destructive changes are executed. Return `Err(message)` to reject. |
 | `failpoint` | `Option<Failpoint>` | `None` | Test-only crash injection point. Should never be set in production. |
+| `capabilities` | `Option<Capabilities>` | `None` | Pre-detected capabilities to skip runtime probing. When `None` (default), capabilities are auto-detected via `Capabilities::detect()`. When `Some`, the provided capabilities are used directly. |
 
 The `PreDestructiveHook` type is defined as:
 
@@ -992,6 +994,9 @@ pub struct Capabilities {
     pub has_fts_module: bool,
     pub has_vector_module: bool,
     pub has_materialized_views: bool,
+    pub supports_without_rowid: bool,
+    pub supports_generated_columns: bool,
+    pub has_triggers: bool,
 }
 ```
 
@@ -1005,6 +1010,9 @@ Capabilities {
     has_fts_module: false,
     has_vector_module: false,
     has_materialized_views: false,
+    supports_without_rowid: false,
+    supports_generated_columns: false,
+    has_triggers: false,
 }
 ```
 
@@ -1432,12 +1440,28 @@ Before executing any DDL, turso-converge probes the connection for supported fea
 | FTS | Create and drop a test FTS index on a temp table |
 | Vector columns | Create and drop a temp table with a `vector32(1)` column |
 | Materialized views | Create and drop a temp materialized view |
+| WITHOUT ROWID | Create and drop a temp WITHOUT ROWID table |
+| GENERATED columns | Create and drop a temp table with a GENERATED column |
+| Triggers | Create a temp table and trigger, clean up |
 
 If the desired schema uses features the connection doesn't support, a `MigrateError::UnsupportedFeature` is returned with a descriptive message.
 
 Probe artifacts (tables named `_cap_probe_*`) are cleaned up and filtered from introspection.
 
 Source: [`src/introspect.rs:316-363`](src/introspect.rs) (`probe_fts`, `probe_vector`, `probe_materialized_views`)
+
+#### Turso Builder Flags
+
+| Schema Feature | Required Builder Flag | Scope |
+|---|---|---|
+| FTS indexes (`USING fts`) | `.experimental_index_method(true)` | Experimental |
+| Materialized views | `.experimental_materialized_views(true)` | Experimental |
+| Triggers | `.experimental_triggers(true)` | Experimental |
+| WITHOUT ROWID tables | None — engine-level support | Engine |
+| GENERATED columns | None — engine-level support | Engine |
+| Vector columns | None — requires vector module | Module |
+
+Features marked "Engine" are supported or rejected at the Turso/libSQL parser level, not via builder flags. turso-converge detects support via runtime probes regardless.
 
 ### Pre-Destructive Backup
 
@@ -1481,11 +1505,11 @@ turso-converge ships a CLI binary for development and CI workflows. Source: [`sr
 
 The CLI opens local databases with all experimental flags enabled (`experimental_index_method`, `experimental_materialized_views`, `experimental_triggers`).
 
-<a id="cli-dump"></a>
-### `dump`
+<a id="cli-extract"></a>
+### `extract`
 
 ```bash
-turso-converge dump <db-path>
+turso-converge extract <db-path>
 ```
 
 Extracts the schema from an existing database and prints it as SQL to stdout. Tables are topologically sorted by foreign key dependencies. Internal tables (`_schema_meta`, `sqlite_*`, etc.) are excluded. Standard indexes are emitted first, then FTS indexes, then views, then triggers.
@@ -1495,15 +1519,15 @@ Exits with code 0 on success, or code 1 if the database has no user tables.
 **Use case:** Bootstrap turso-converge on an existing database. Pipe the output to a file to create your initial schema definition:
 
 ```bash
-turso-converge dump my.db > turso_schema.sql
+turso-converge extract my.db > schema.sql
 ```
 
-From this point forward, edit `turso_schema.sql` and use `converge` to apply changes.
+From this point forward, edit `schema.sql` and use `converge` to apply changes.
 
 **Programmatic equivalent:**
 ```rust
 let snapshot = SchemaSnapshot::from_connection(&conn).await?;
-std::fs::write("turso_schema.sql", snapshot.to_sql())?;
+std::fs::write("schema.sql", snapshot.to_sql())?;
 ```
 
 <a id="cli-validate"></a>
@@ -1633,6 +1657,9 @@ Database introspection is implemented in [`src/introspect.rs`](src/introspect.rs
 4. **FTS support:** Creates a temp table, attempts a `CREATE INDEX ... USING fts`, cleans up.
 5. **Vector support:** Attempts `CREATE TABLE ... (v vector32(1))`, cleans up.
 6. **Materialized view support:** Creates a temp table, attempts `CREATE MATERIALIZED VIEW`, cleans up.
+7. **WITHOUT ROWID support:** Attempts `CREATE TABLE ... WITHOUT ROWID`, cleans up.
+8. **GENERATED column support:** Attempts `CREATE TABLE ... GENERATED ALWAYS AS ...`, cleans up.
+9. **Trigger support:** Creates a temp table, attempts `CREATE TRIGGER`, cleans up.
 
 ### DDL Generation
 
@@ -1880,11 +1907,11 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 
 **COLLATE detection is SQL-based.** COLLATE clauses are extracted from `CREATE TABLE` SQL using pattern matching (finding the column section, then looking for the `COLLATE` keyword). Unusual formatting or column names that are substrings of other column names could theoretically be mismatched, though the implementation handles quoted identifiers.
 
-**FTS + triggers + materialized views require experimental Turso flags.** You must set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`. Without these flags, `MigrateError::UnsupportedFeature` is returned.
+**FTS + triggers + materialized views require experimental Turso flags.** You must set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`. Without these flags, `MigrateError::UnsupportedFeature` is returned with a message specifying which flag is needed.
 
-**WITHOUT ROWID tables are not supported by Turso.** The `detect_without_rowid` introspection exists in turso-converge for future compatibility, but Turso (as of 3.50.4) returns `"WITHOUT ROWID tables are not supported"` at the parser level.
+**WITHOUT ROWID tables are not supported by Turso.** turso-converge detects this via a runtime probe and returns `MigrateError::UnsupportedFeature` with a clear message before attempting to parse the schema. When Turso adds support, the probe will detect it automatically.
 
-**GENERATED columns are not supported by Turso.** The `is_generated` column tracking exists in turso-converge for future compatibility, but Turso (as of 3.50.4) returns `"GENERATED columns are not supported yet"` at the parser level.
+**GENERATED columns are not supported by Turso.** turso-converge detects this via a runtime probe and returns `MigrateError::UnsupportedFeature` with a clear message before attempting to parse the schema. When Turso adds support, the probe will detect it automatically.
 
 **Snapshot cache is process-wide.** The `from_schema_sql` cache uses a `OnceLock<Mutex<HashMap>>` and is cleared when it exceeds 16 entries. In long-running processes with many distinct schemas, cache churn may occur.
 
@@ -1898,7 +1925,7 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 cargo test
 ```
 
-152 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement (all four policy fields), dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, unsupported feature detection, NoOp mode, migration lease contention, protected table namespace, data integrity verification, and index functionality verification.
+159 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement (all four policy fields), dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, unsupported feature detection, NoOp mode, migration lease contention, protected table namespace, data integrity verification, and index functionality verification.
 
 All tests use in-memory Turso databases — no external services, no network, no test fixtures to set up.
 
@@ -1907,8 +1934,8 @@ All tests use in-memory Turso databases — no external services, no network, no
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/converge.rs` | 25 | Core convergence, fast path, drift, crash recovery |
-| `tests/coverage.rs` | 36 | Policy edge cases, data migration errors, lease contention, AUTOINCREMENT, COLLATE, DROP COLUMN, STRICT tables, CIString, UnsupportedFeature, NoOp mode, data integrity, index verification |
-| `tests/execute.rs` | 26 | Three-phase execution, rebuild, FK checks, views |
+| `tests/coverage.rs` | 43 | Policy edge cases, data migration errors, lease contention, AUTOINCREMENT, COLLATE, DROP COLUMN, STRICT tables, CIString, UnsupportedFeature, NoOp mode, data integrity, index verification, capabilities validation (WITHOUT ROWID, GENERATED, triggers) |
+| `tests/execute.rs` | 21 | Three-phase execution, rebuild, FK checks, views |
 | `tests/diff.rs` | 23 | Diff computation, rename detection, SQL normalization |
 | `tests/new_api.rs` | 16 | `converge_with_options`, policy, dry-run, backup, hooks |
 | `tests/introspect.rs` | 12 | `table_xinfo`, batched introspection, snapshot caching |

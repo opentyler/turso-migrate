@@ -301,6 +301,9 @@ impl Capabilities {
         let has_fts = probe_fts(conn).await;
         let has_vector = probe_vector(conn).await;
         let has_materialized = probe_materialized_views(conn).await;
+        let has_without_rowid = probe_without_rowid(conn).await;
+        let has_generated = probe_generated_columns(conn).await;
+        let has_triggers = probe_triggers(conn).await;
 
         Ok(Self {
             database_version: (major, minor, patch),
@@ -309,6 +312,9 @@ impl Capabilities {
             has_fts_module: has_fts,
             has_vector_module: has_vector,
             has_materialized_views: has_materialized,
+            supports_without_rowid: has_without_rowid,
+            supports_generated_columns: has_generated,
+            has_triggers,
         })
     }
 }
@@ -359,6 +365,57 @@ async fn probe_materialized_views(conn: &turso::Connection) -> bool {
         .execute("DROP VIEW IF EXISTS _cap_probe_matview", ())
         .await;
     let _ = conn.execute("DROP TABLE IF EXISTS _cap_probe_mv", ()).await;
+    result.is_ok()
+}
+
+async fn probe_without_rowid(conn: &turso::Connection) -> bool {
+    let result = conn
+        .execute(
+            "CREATE TABLE IF NOT EXISTS _cap_probe_wr (id INTEGER PRIMARY KEY) WITHOUT ROWID",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("DROP TABLE IF EXISTS _cap_probe_wr", ())
+        .await;
+    result.is_ok()
+}
+
+async fn probe_generated_columns(conn: &turso::Connection) -> bool {
+    let result = conn
+        .execute(
+            "CREATE TABLE IF NOT EXISTS _cap_probe_gen (x INTEGER, y INTEGER GENERATED ALWAYS AS (x * 2) STORED)",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("DROP TABLE IF EXISTS _cap_probe_gen", ())
+        .await;
+    result.is_ok()
+}
+
+async fn probe_triggers(conn: &turso::Connection) -> bool {
+    let setup = conn
+        .execute(
+            "CREATE TABLE IF NOT EXISTS _cap_probe_trg (x INTEGER)",
+            (),
+        )
+        .await;
+    if setup.is_err() {
+        return false;
+    }
+    let result = conn
+        .execute(
+            "CREATE TRIGGER _cap_probe_trigger AFTER INSERT ON _cap_probe_trg BEGIN SELECT 1; END",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("DROP TRIGGER IF EXISTS _cap_probe_trigger", ())
+        .await;
+    let _ = conn
+        .execute("DROP TABLE IF EXISTS _cap_probe_trg", ())
+        .await;
     result.is_ok()
 }
 

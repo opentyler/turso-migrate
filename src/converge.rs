@@ -106,6 +106,12 @@ async fn run_slow_path(
     check_failpoint(options.failpoint, Failpoint::BeforeIntrospect)?;
     set_meta(conn, "migration_phase", "introspect").await?;
 
+    let caps = match &options.capabilities {
+        Some(c) => c.clone(),
+        None => Capabilities::detect(conn).await.unwrap_or_default(),
+    };
+    validate_raw_schema_features(schema_sql, &caps)?;
+
     tracing::info!("converge: slow-path, computing diff");
     let desired = SchemaSnapshot::from_schema_sql(schema_sql).await?;
     let actual = SchemaSnapshot::from_connection(conn).await?;
@@ -135,7 +141,6 @@ async fn run_slow_path(
             }
         }
 
-        let caps = Capabilities::detect(conn).await.unwrap_or_default();
         validate_features(&desired, &caps)?;
 
         tracing::info!(
@@ -146,6 +151,32 @@ async fn run_slow_path(
             columns_drop = diff.columns_to_drop.len(),
             "converge: generating migration plan"
         );
+
+        for table_name in &diff.tables_to_rebuild {
+            let count_sql = format!(
+                "SELECT COUNT(*) FROM {}",
+                crate::plan::quote_ident(table_name)
+            );
+            match conn.query(&count_sql, ()).await {
+                Ok(mut rows) => {
+                    if let Ok(Some(row)) = rows.next().await {
+                        let count: i64 = row.get(0).unwrap_or(0);
+                        tracing::info!(
+                            table = %table_name,
+                            rows = count,
+                            "converge: table rebuild will copy rows"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        table = %table_name,
+                        error = %e,
+                        "converge: could not determine row count before rebuild"
+                    );
+                }
+            }
+        }
 
         let plan = generate_plan(&diff, &desired, &actual)?;
 
@@ -285,6 +316,25 @@ fn check_policy(
     Ok(())
 }
 
+fn validate_raw_schema_features(
+    schema_sql: &str,
+    caps: &Capabilities,
+) -> Result<(), MigrateError> {
+    let lower = schema_sql.to_ascii_lowercase();
+    if !caps.supports_without_rowid && lower.contains("without rowid") {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses WITHOUT ROWID tables but the target connection doesn't support them."
+                .into(),
+        ));
+    }
+    if !caps.supports_generated_columns && lower.contains("generated always as") {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses GENERATED columns but the target connection doesn't support them.".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_features(desired: &SchemaSnapshot, caps: &Capabilities) -> Result<(), MigrateError> {
     let has_fts = desired.indexes.values().any(|i| i.is_fts);
     let has_materialized = desired.views.values().any(|v| v.is_materialized);
@@ -313,6 +363,33 @@ fn validate_features(desired: &SchemaSnapshot, caps: &Capabilities) -> Result<()
             "Schema uses vector columns but the target connection lacks the vector module.".into(),
         ));
     }
+
+    let has_without_rowid = desired.tables.values().any(|t| t.is_without_rowid);
+    let has_generated = desired
+        .tables
+        .values()
+        .any(|t| t.columns.iter().any(|c| c.is_generated));
+    let has_triggers = !desired.triggers.is_empty();
+
+    if has_without_rowid && !caps.supports_without_rowid {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses WITHOUT ROWID tables but the target connection doesn't support them."
+                .into(),
+        ));
+    }
+    if has_generated && !caps.supports_generated_columns {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses GENERATED columns but the target connection doesn't support them.".into(),
+        ));
+    }
+    if has_triggers && !caps.has_triggers {
+        return Err(MigrateError::UnsupportedFeature(
+            "Schema uses triggers but the target connection doesn't support them. \
+             Ensure .experimental_triggers(true) is set on your turso::Builder."
+                .into(),
+        ));
+    }
+
     Ok(())
 }
 

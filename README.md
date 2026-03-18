@@ -7,7 +7,7 @@ Define your desired schema once. turso-converge diffs it against the live databa
 ```
 Traditional migrations:           turso-converge:
 
-001_create_users.sql             turso_schema.sql  ← single source of truth
+001_create_users.sql             schema.sql  ← single source of truth
 002_add_email.sql                       ↓
 003_create_posts.sql             converge(&conn, SCHEMA)
 004_add_index.sql                       ↓
@@ -63,6 +63,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+> **Already have a database?** Extract your current schema to bootstrap turso-converge:
+> ```bash
+> turso-converge extract my.db > schema.sql
+> ```
+> Then use `schema.sql` as your source of truth going forward.
 
 ## How It Works
 
@@ -130,6 +136,7 @@ let options = ConvergeOptions {
     rename_hints: vec![],                   // Optional explicit column rename hints
     pre_destructive_hook: None,             // Optional callback gate before destructive changes
     failpoint: None,                        // Test-only crash injection selector
+    capabilities: None,                     // Optional pre-detected capabilities (skips probing)
 };
 ```
 
@@ -317,7 +324,7 @@ turso-converge is designed to be safe by default:
 | **Protected namespace** | `_schema_meta`, `_converge_new_*`, `sqlite_*`, etc. never dropped |
 | **AUTOINCREMENT preservation** | `sqlite_sequence` values saved and restored across rebuilds |
 | **Busy timeout** | `PRAGMA busy_timeout` (default 5s) prevents busy errors |
-| **Feature preflight** | Runtime probes detect FTS/vector/materialized view support before execution |
+| **Feature preflight** | Runtime probes detect FTS/vector/materialized view/trigger/WITHOUT ROWID/GENERATED support before execution |
 | **Read-only guard** | `MigrateError::ReadOnly` returned immediately on replica connections |
 
 ## Supported Schema Features
@@ -345,7 +352,7 @@ turso-converge is designed to be safe by default:
 Development and CI workflow commands:
 
 ```bash
-turso-converge dump     my.db                # Extract schema SQL from existing DB
+turso-converge extract  my.db                # Extract schema SQL from existing DB
 turso-converge validate schema.sql           # Validate syntax against in-memory DB
 turso-converge diff     my.db schema.sql     # Human-readable diff
 turso-converge plan     my.db schema.sql     # Show migration SQL (dry-run)
@@ -353,7 +360,7 @@ turso-converge check    my.db schema.sql     # Exit 0 if converged, 1 if not
 turso-converge apply    my.db schema.sql     # Apply convergence
 ```
 
-`dump` is the bootstrapping entry point — extract your existing database's schema to start using turso-converge. `check` is designed for CI gates — exits non-zero if the schema is not converged.
+`extract` is the bootstrapping entry point — extract your existing database's schema to start using turso-converge. `check` is designed for CI gates — exits non-zero if the schema is not converged.
 
 ## Error Types
 
@@ -365,7 +372,7 @@ All operations return `Result<_, MigrateError>`:
 | `Schema(msg)` | Validation error (NOT NULL without DEFAULT, empty schema, etc.) |
 | `MigrationBusy` | Another migration holds the lease |
 | `ReadOnly` | Connection is read-only |
-| `UnsupportedFeature` | Schema uses FTS/vector/materialized views without builder flags |
+| `UnsupportedFeature` | Schema uses features the target connection doesn't support (FTS, vector, materialized views, triggers, WITHOUT ROWID, GENERATED) |
 | `ForeignKeyViolation` | FK check failed after table rebuild |
 | `Statement` | SQL execution failed (includes the SQL, error, and phase) |
 | `PreDestructiveHookRejected` | User hook rejected destructive changes |
@@ -381,9 +388,9 @@ All operations return `Result<_, MigrateError>`:
 
 **Rollback is single-step.** `rollback_to_previous` restores the most recent prior schema, not arbitrary history.
 
-**WITHOUT ROWID and GENERATED columns are not supported by Turso** (as of 3.50.4). turso-converge includes introspection support for future compatibility, but these features will fail at the Turso parser level.
+**WITHOUT ROWID and GENERATED columns are not supported by Turso.** turso-converge detects this via runtime probes and returns `MigrateError::UnsupportedFeature` with a clear message before attempting to parse the schema.
 
-**FTS, triggers, and materialized views require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`.
+**FTS, triggers, and materialized views require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`. Missing flags are detected via runtime probes and reported as `MigrateError::UnsupportedFeature`.
 
 ## Tests
 
@@ -391,7 +398,7 @@ All operations return `Result<_, MigrateError>`:
 cargo test
 ```
 
-152 tests. In-memory Turso databases, no external services.
+159 tests. In-memory Turso databases, no external services.
 
 ## Full Documentation
 
