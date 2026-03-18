@@ -7,22 +7,36 @@ pub async fn execute_plan(
     conn: &turso::Connection,
     plan: &MigrationPlan,
 ) -> Result<(), MigrateError> {
-    execute_plan_with_timeout(conn, plan, Duration::from_secs(5)).await
+    execute_plan_with_timeout(conn, plan, Duration::from_secs(5), "").await
+}
+
+/// Set PRAGMA busy_timeout before acquiring lease or executing DDL.
+pub async fn set_busy_timeout(
+    conn: &turso::Connection,
+    timeout: Duration,
+) -> Result<(), MigrateError> {
+    let ms = timeout.as_millis();
+    conn.execute(&format!("PRAGMA busy_timeout = {ms}"), ())
+        .await
+        .map_err(|e| MigrateError::Statement {
+            stmt: format!("PRAGMA busy_timeout = {ms}"),
+            source: e,
+            phase: "setup".to_string(),
+        })?;
+    Ok(())
 }
 
 pub async fn execute_plan_with_timeout(
     conn: &turso::Connection,
     plan: &MigrationPlan,
     busy_timeout: Duration,
+    lease_id: &str,
 ) -> Result<(), MigrateError> {
     if plan.is_empty() {
         return Ok(());
     }
 
-    let timeout_ms = busy_timeout.as_millis();
-    let _ = conn
-        .execute(&format!("PRAGMA busy_timeout = {timeout_ms}"), ())
-        .await;
+    set_busy_timeout(conn, busy_timeout).await?;
 
     let has_rebuilds = !plan.rebuilt_tables.is_empty();
 
@@ -34,13 +48,64 @@ pub async fn execute_plan_with_timeout(
             .partition(|stmt| !is_create_view_or_trigger(stmt));
 
         run_ddl_transaction(conn, &phase1, has_rebuilds, "DDL").await?;
+
+        verify_and_refresh_lease(conn, lease_id).await?;
         run_non_transactional(conn, &plan.non_transactional_stmts, "FTS").await?;
+
         if !phase2.is_empty() {
+            verify_and_refresh_lease(conn, lease_id).await?;
             run_views_and_triggers(conn, &phase2).await?;
         }
     } else {
+        verify_and_refresh_lease(conn, lease_id).await?;
         run_non_transactional(conn, &plan.non_transactional_stmts, "FTS").await?;
     }
+
+    Ok(())
+}
+
+async fn verify_and_refresh_lease(
+    conn: &turso::Connection,
+    lease_id: &str,
+) -> Result<(), MigrateError> {
+    if lease_id.is_empty() {
+        return Ok(());
+    }
+
+    let owner = conn
+        .query(
+            "SELECT value FROM _schema_meta WHERE key = 'migration_owner'",
+            (),
+        )
+        .await;
+
+    let current_owner = match owner {
+        Ok(mut rows) => match rows.next().await {
+            Ok(Some(row)) => row.get::<String>(0).ok(),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+
+    if current_owner.as_deref() != Some(lease_id) {
+        return Err(MigrateError::Schema(
+            "Migration lease was stolen by another process between execution phases. \
+             Aborting to prevent concurrent DDL corruption."
+                .to_string(),
+        ));
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let new_expiry = now + 300;
+    let _ = conn
+        .execute(
+            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES ('migration_lease_until', ?1)",
+            [new_expiry.to_string().as_str()],
+        )
+        .await;
 
     Ok(())
 }
@@ -56,7 +121,12 @@ async fn run_ddl_transaction(
     }
 
     if has_rebuilds {
-        let _ = conn.execute("PRAGMA defer_foreign_keys = ON", ()).await;
+        if let Err(e) = conn.execute("PRAGMA defer_foreign_keys = ON", ()).await {
+            tracing::warn!(
+                error = %e,
+                "defer_foreign_keys not supported; self-referential FK rebuilds may fail"
+            );
+        }
     }
 
     conn.execute("BEGIN IMMEDIATE", ()).await?;
@@ -88,10 +158,12 @@ async fn run_ddl_transaction(
 }
 
 async fn check_foreign_keys(conn: &turso::Connection) -> Result<(), MigrateError> {
-    let result = conn.query("PRAGMA foreign_key_check", ()).await;
-    let mut rows = match result {
+    let mut rows = match conn.query("PRAGMA foreign_key_check", ()).await {
         Ok(rows) => rows,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            tracing::warn!(error = %e, "foreign_key_check not supported; skipping FK validation");
+            return Ok(());
+        }
     };
 
     if let Ok(Some(row)) = rows.next().await {

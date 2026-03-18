@@ -546,3 +546,34 @@ async fn view_creation_retries_handle_string_literal_false_dependencies() {
     let mut rows = conn.query("SELECT id FROM v2", ()).await.unwrap();
     assert!(rows.next().await.unwrap().is_none());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_handles_if_not_exists_in_create_table() {
+    let (_db, conn) = empty_db().await;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, val TEXT)",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("INSERT INTO items (id, val) VALUES ('a', 'v')", ())
+        .await
+        .unwrap();
+
+    let desired_sql =
+        "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, val INTEGER DEFAULT 0);";
+    let desired = SchemaSnapshot::from_schema_sql(desired_sql).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        diff.tables_to_rebuild.contains(&"items".to_string()),
+        "type change should force rebuild"
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(snap.has_table("items"), "table should survive rebuild");
+}

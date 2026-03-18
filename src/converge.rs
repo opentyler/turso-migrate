@@ -69,6 +69,7 @@ pub async fn converge_with_options(
         tracing::warn!("converge: crash recovery detected, forcing slow-path");
     }
 
+    crate::execute::set_busy_timeout(conn, options.busy_timeout).await?;
     let lease_id = acquire_lease(conn).await?;
 
     let result = run_slow_path(
@@ -77,6 +78,7 @@ pub async fn converge_with_options(
         &schema_hash,
         options,
         is_crash_recovery,
+        &lease_id,
         start,
     )
     .await;
@@ -96,6 +98,7 @@ async fn run_slow_path(
     schema_hash: &str,
     options: &ConvergeOptions,
     is_crash_recovery: bool,
+    lease_id: &str,
     start: Instant,
 ) -> Result<ConvergeReport, MigrateError> {
     check_failpoint(options.failpoint, Failpoint::BeforeIntrospect)?;
@@ -177,7 +180,8 @@ async fn run_slow_path(
             non_transactional = plan.non_transactional_stmts.len(),
             "converge: executing migration plan"
         );
-        crate::execute::execute_plan_with_timeout(conn, &plan, options.busy_timeout).await?;
+        crate::execute::execute_plan_with_timeout(conn, &plan, options.busy_timeout, lease_id)
+            .await?;
 
         check_failpoint(options.failpoint, Failpoint::AfterExecuteBeforeState)?;
 

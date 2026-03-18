@@ -458,24 +458,95 @@ fn build_copy_data_stmt(
 
 fn rewrite_create_table_name(create_sql: &str, temp_table_name: &str) -> String {
     let lower = create_sql.to_lowercase();
-    let Some(create_pos) = lower.find("create table") else {
+    let Some(create_pos) = lower.find("create") else {
         return create_sql.to_string();
     };
 
-    let mut idx = create_pos + "create table".len();
     let bytes = create_sql.as_bytes();
+    let lower_bytes = lower.as_bytes();
+    let mut idx = create_pos + "create".len();
+
+    // skip whitespace after CREATE
     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
         idx += 1;
+    }
+
+    // skip optional TEMP / TEMPORARY
+    if lower_bytes[idx..].starts_with(b"temp ") || lower_bytes[idx..].starts_with(b"temp\t") {
+        idx += 4;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+    } else if lower_bytes[idx..].starts_with(b"temporary ")
+        || lower_bytes[idx..].starts_with(b"temporary\t")
+    {
+        idx += 9;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+    }
+
+    // expect TABLE keyword
+    if !lower_bytes[idx..].starts_with(b"table") {
+        return create_sql.to_string();
+    }
+    idx += "table".len();
+
+    // skip whitespace after TABLE
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+
+    // skip optional IF NOT EXISTS
+    if lower_bytes[idx..].starts_with(b"if") {
+        let saved = idx;
+        idx += 2;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if lower_bytes[idx..].starts_with(b"not") {
+            idx += 3;
+            while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                idx += 1;
+            }
+            if lower_bytes[idx..].starts_with(b"exists") {
+                idx += 6;
+                while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                    idx += 1;
+                }
+            } else {
+                idx = saved;
+            }
+        } else {
+            idx = saved;
+        }
     }
 
     if idx >= bytes.len() {
         return create_sql.to_string();
     }
 
+    // extract the table name (quoted or unquoted)
     let (start, end) = if bytes[idx] == b'"' {
         let start = idx;
         idx += 1;
         while idx < bytes.len() && bytes[idx] != b'"' {
+            idx += 1;
+        }
+        let end = if idx < bytes.len() { idx + 1 } else { idx };
+        (start, end)
+    } else if bytes[idx] == b'[' {
+        let start = idx;
+        idx += 1;
+        while idx < bytes.len() && bytes[idx] != b']' {
+            idx += 1;
+        }
+        let end = if idx < bytes.len() { idx + 1 } else { idx };
+        (start, end)
+    } else if bytes[idx] == b'`' {
+        let start = idx;
+        idx += 1;
+        while idx < bytes.len() && bytes[idx] != b'`' {
             idx += 1;
         }
         let end = if idx < bytes.len() { idx + 1 } else { idx };

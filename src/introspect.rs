@@ -298,15 +298,68 @@ impl Capabilities {
 
         let (major, minor, patch) = parse_version(&version_str);
 
+        let has_fts = probe_fts(conn).await;
+        let has_vector = probe_vector(conn).await;
+        let has_materialized = probe_materialized_views(conn).await;
+
         Ok(Self {
             sqlite_version: (major, minor, patch),
             supports_drop_column: (major, minor, patch) >= (3, 35, 0),
             supports_rename_column: (major, minor, patch) >= (3, 25, 0),
-            has_fts_module: true,
-            has_vector_module: true,
-            has_materialized_views: true,
+            has_fts_module: has_fts,
+            has_vector_module: has_vector,
+            has_materialized_views: has_materialized,
         })
     }
+}
+
+async fn probe_fts(conn: &turso::Connection) -> bool {
+    let setup = conn
+        .execute("CREATE TABLE IF NOT EXISTS _cap_probe_fts (x TEXT)", ())
+        .await;
+    if setup.is_err() {
+        return false;
+    }
+    let result = conn
+        .execute_batch("CREATE INDEX _cap_probe_idx ON _cap_probe_fts USING fts (x);")
+        .await;
+    let _ = conn
+        .execute_batch("DROP INDEX IF EXISTS _cap_probe_idx;")
+        .await;
+    let _ = conn
+        .execute("DROP TABLE IF EXISTS _cap_probe_fts", ())
+        .await;
+    result.is_ok()
+}
+
+async fn probe_vector(conn: &turso::Connection) -> bool {
+    let result = conn
+        .execute(
+            "CREATE TABLE IF NOT EXISTS _cap_probe_vec (v vector32(1))",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("DROP TABLE IF EXISTS _cap_probe_vec", ())
+        .await;
+    result.is_ok()
+}
+
+async fn probe_materialized_views(conn: &turso::Connection) -> bool {
+    let _ = conn
+        .execute("CREATE TABLE IF NOT EXISTS _cap_probe_mv (x TEXT)", ())
+        .await;
+    let result = conn
+        .execute(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS _cap_probe_matview AS SELECT x FROM _cap_probe_mv",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("DROP VIEW IF EXISTS _cap_probe_matview", ())
+        .await;
+    let _ = conn.execute("DROP TABLE IF EXISTS _cap_probe_mv", ()).await;
+    result.is_ok()
 }
 
 fn parse_version(s: &str) -> (u32, u32, u32) {
@@ -341,7 +394,7 @@ async fn table_columns_xinfo(
     conn: &turso::Connection,
     table_name: &str,
 ) -> Result<Vec<ColumnInfo>, turso::Error> {
-    let xinfo_pragma = format!("PRAGMA table_xinfo('{table_name}')");
+    let xinfo_pragma = format!("PRAGMA table_xinfo('{}')", table_name.replace('\'', "''"));
     match conn.query(&xinfo_pragma, ()).await {
         Ok(mut rows) => {
             let mut columns = Vec::new();
@@ -424,7 +477,7 @@ async fn table_columns_fallback(
     conn: &turso::Connection,
     table_name: &str,
 ) -> Result<Vec<ColumnInfo>, turso::Error> {
-    let pragma = format!("PRAGMA table_info('{table_name}')");
+    let pragma = format!("PRAGMA table_info('{}')", table_name.replace('\'', "''"));
     let mut rows = conn.query(&pragma, ()).await?;
     let mut columns = Vec::new();
 
@@ -454,7 +507,10 @@ async fn table_foreign_keys(
     conn: &turso::Connection,
     table_name: &str,
 ) -> Result<Vec<ForeignKey>, turso::Error> {
-    let pragma = format!("PRAGMA foreign_key_list('{table_name}')");
+    let pragma = format!(
+        "PRAGMA foreign_key_list('{}')",
+        table_name.replace('\'', "''")
+    );
     let mut rows = conn.query(&pragma, ()).await?;
 
     let mut fk_map: BTreeMap<i64, ForeignKey> = BTreeMap::new();
