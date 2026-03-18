@@ -45,19 +45,11 @@ pub fn generate_plan(
     let mut views_to_drop: BTreeSet<String> = diff.views_to_drop.iter().cloned().collect();
     let mut views_to_create: BTreeSet<String> = diff.views_to_create.iter().cloned().collect();
 
-    for (name, view) in &actual.views {
-        if rebuilt_lower
-            .iter()
-            .any(|table| view_depends_on_table(&view.sql, table))
-        {
+    if !rebuilt_lower.is_empty() {
+        for name in actual.views.keys() {
             views_to_drop.insert(name.raw().to_string());
         }
-    }
-    for (name, view) in &desired.views {
-        if rebuilt_lower
-            .iter()
-            .any(|table| view_depends_on_table(&view.sql, table))
-        {
+        for name in desired.views.keys() {
             views_to_create.insert(name.raw().to_string());
         }
     }
@@ -242,6 +234,10 @@ pub fn generate_plan(
     }
     for idx_name in &fts_indexes_to_create {
         if let Some(index) = desired.get_index(idx_name) {
+            if !fts_indexes_to_drop.contains(idx_name) {
+                non_transactional_stmts
+                    .push(format!("DROP INDEX IF EXISTS {}", quote_ident(idx_name)));
+            }
             non_transactional_stmts.push(index.sql.clone());
         }
     }

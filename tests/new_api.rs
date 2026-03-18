@@ -99,12 +99,7 @@ async fn to_sql_round_trips() {
     conn2.execute_batch(&sql).await.unwrap();
     let snap2 = SchemaSnapshot::from_connection(&conn2).await.unwrap();
 
-    let tables1: Vec<_> = snap1
-        .tables
-        .keys()
-        .filter(|name| name.raw() != "schema_version")
-        .cloned()
-        .collect();
+    let tables1: Vec<_> = snap1.tables.keys().cloned().collect();
     let tables2: Vec<_> = snap2.tables.keys().cloned().collect();
     assert_eq!(tables1, tables2);
 }

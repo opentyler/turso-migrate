@@ -376,7 +376,7 @@ fn parse_version(s: &str) -> (u32, u32, u32) {
 
 fn is_meta_table(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower == "_schema_meta" || lower == "_turso_migrations" || lower == "schema_version"
+    lower == "_schema_meta" || lower == "_turso_migrations"
 }
 
 fn is_internal_object(name: &str) -> bool {
@@ -585,8 +585,51 @@ fn parse_fk_references_from_sql(table_sql: &str) -> Vec<ForeignKey> {
     let mut idx = 0;
 
     while idx < lower_bytes.len() {
+        if bytes[idx] == b'\'' {
+            idx += 1;
+            while idx < bytes.len() && bytes[idx] != b'\'' {
+                idx += 1;
+            }
+            if idx < bytes.len() {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if idx + 1 < bytes.len() && bytes[idx] == b'-' && bytes[idx + 1] == b'-' {
+            while idx < bytes.len() && bytes[idx] != b'\n' {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if idx + 1 < bytes.len() && bytes[idx] == b'/' && bytes[idx + 1] == b'*' {
+            idx += 2;
+            while idx + 1 < bytes.len() && !(bytes[idx] == b'*' && bytes[idx + 1] == b'/') {
+                idx += 1;
+            }
+            if idx + 1 < bytes.len() {
+                idx += 2;
+            }
+            continue;
+        }
+
         if lower_bytes[idx..].starts_with(b"references") {
-            idx += "references".len();
+            let before = if idx > 0 { bytes[idx - 1] } else { b' ' };
+            let after_pos = idx + "references".len();
+            let after = if after_pos < bytes.len() {
+                bytes[after_pos]
+            } else {
+                b' '
+            };
+            if (before.is_ascii_alphanumeric() || before == b'_')
+                || (after.is_ascii_alphanumeric() || after == b'_')
+            {
+                idx += 1;
+                continue;
+            }
+
+            idx = after_pos;
             while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
                 idx += 1;
             }
