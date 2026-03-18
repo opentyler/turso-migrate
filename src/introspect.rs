@@ -744,3 +744,44 @@ fn snapshot_cache_put(hash: String, snapshot: SchemaSnapshot) {
         map.insert(hash, Arc::new(snapshot));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_fk_references_from_sql;
+
+    #[test]
+    fn parse_fk_references_skips_literals_and_comments() {
+        let sql = r#"
+            CREATE TABLE child (
+                id TEXT PRIMARY KEY,
+                note TEXT DEFAULT 'this references fake_table(id)',
+                -- REFERENCES comment_table(id)
+                parent_id TEXT REFERENCES parent(id),
+                other_parent TEXT REFERENCES "parent_two"(id),
+                blocky TEXT /* REFERENCES block_comment_table(id) */
+            );
+        "#;
+
+        let refs = parse_fk_references_from_sql(sql);
+        let tables: Vec<String> = refs.into_iter().map(|fk| fk.to_table).collect();
+
+        assert_eq!(tables, vec!["parent".to_string(), "parent_two".to_string()]);
+    }
+
+    #[test]
+    fn parse_fk_references_enforces_word_boundaries() {
+        let sql = r#"
+            CREATE TABLE child (
+                id TEXT PRIMARY KEY,
+                references_flag TEXT,
+                x TEXT REFERENCES parent(id),
+                y TEXT notreferencesz
+            );
+        "#;
+
+        let refs = parse_fk_references_from_sql(sql);
+        let tables: Vec<String> = refs.into_iter().map(|fk| fk.to_table).collect();
+
+        assert_eq!(tables, vec!["parent".to_string()]);
+    }
+}

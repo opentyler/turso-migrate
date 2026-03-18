@@ -408,6 +408,56 @@ async fn materialized_view_recreated_after_table_change() {
 }
 
 #[tokio::test]
+async fn rebuild_recreates_all_views_not_just_dependent_ones() {
+    let (_db, conn) = empty_db().await;
+    let schema_v1 = "\
+        CREATE TABLE items (id TEXT PRIMARY KEY, category TEXT, old_col TEXT);\n\
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);\n\
+        CREATE VIEW v_items AS SELECT id, category FROM items;\n\
+        CREATE VIEW v_settings AS SELECT key, value FROM settings;";
+    conn.execute_batch(schema_v1).await.unwrap();
+
+    let schema_v2 = "\
+        CREATE TABLE items (id TEXT PRIMARY KEY, category TEXT);\n\
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);\n\
+        CREATE VIEW v_items AS SELECT id, category FROM items;\n\
+        CREATE VIEW v_settings AS SELECT key, value FROM settings;";
+
+    let desired = SchemaSnapshot::from_schema_sql(schema_v2).await.unwrap();
+    let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    let diff = compute_diff(&desired, &actual);
+    assert!(
+        diff.tables_to_rebuild.contains(&"items".to_string()),
+        "items should be rebuilt due to column removal"
+    );
+
+    let plan = generate_plan(&diff, &desired, &actual).unwrap();
+    let tx_sql = plan.transactional_stmts.join("\n").to_ascii_lowercase();
+    assert!(
+        tx_sql.contains("drop view if exists \"v_items\""),
+        "dependent view should be dropped"
+    );
+    assert!(
+        tx_sql.contains("drop view if exists \"v_settings\""),
+        "unrelated view should also be dropped under rebuild-all policy"
+    );
+    assert!(
+        tx_sql.contains("create view v_items"),
+        "dependent view should be recreated"
+    );
+    assert!(
+        tx_sql.contains("create view v_settings"),
+        "unrelated view should also be recreated"
+    );
+
+    execute_plan(&conn, &plan).await.unwrap();
+
+    let after = SchemaSnapshot::from_connection(&conn).await.unwrap();
+    assert!(after.has_view("v_items"));
+    assert!(after.has_view("v_settings"));
+}
+
+#[tokio::test]
 async fn full_schema_convergence_creates_all_objects() {
     let (_db, conn) = empty_db().await;
     let desired = SchemaSnapshot::from_schema_sql(test_schema())
