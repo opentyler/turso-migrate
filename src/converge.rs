@@ -316,10 +316,7 @@ fn check_policy(
     Ok(())
 }
 
-fn validate_raw_schema_features(
-    schema_sql: &str,
-    caps: &Capabilities,
-) -> Result<(), MigrateError> {
+fn validate_raw_schema_features(schema_sql: &str, caps: &Capabilities) -> Result<(), MigrateError> {
     let lower = schema_sql.to_ascii_lowercase();
     if !caps.supports_without_rowid && lower.contains("without rowid") {
         return Err(MigrateError::UnsupportedFeature(

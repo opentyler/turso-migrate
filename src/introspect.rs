@@ -375,9 +375,7 @@ async fn probe_without_rowid(conn: &turso::Connection) -> bool {
             (),
         )
         .await;
-    let _ = conn
-        .execute("DROP TABLE IF EXISTS _cap_probe_wr", ())
-        .await;
+    let _ = conn.execute("DROP TABLE IF EXISTS _cap_probe_wr", ()).await;
     result.is_ok()
 }
 
@@ -396,10 +394,7 @@ async fn probe_generated_columns(conn: &turso::Connection) -> bool {
 
 async fn probe_triggers(conn: &turso::Connection) -> bool {
     let setup = conn
-        .execute(
-            "CREATE TABLE IF NOT EXISTS _cap_probe_trg (x INTEGER)",
-            (),
-        )
+        .execute("CREATE TABLE IF NOT EXISTS _cap_probe_trg (x INTEGER)", ())
         .await;
     if setup.is_err() {
         return false;

@@ -1030,8 +1030,7 @@ async fn unsupported_without_rowid_returns_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unsupported_generated_returns_error() {
     let (_db, conn) = common::empty_db().await;
-    let schema =
-        "CREATE TABLE gen (x INTEGER, y INTEGER GENERATED ALWAYS AS (x * 2) STORED);";
+    let schema = "CREATE TABLE gen (x INTEGER, y INTEGER GENERATED ALWAYS AS (x * 2) STORED);";
     let mut caps = Capabilities::detect(&conn).await.unwrap();
     caps.supports_generated_columns = false;
     let options = ConvergeOptions {
@@ -1044,10 +1043,7 @@ async fn unsupported_generated_returns_error() {
         .unwrap_err();
     match err {
         MigrateError::UnsupportedFeature(msg) => {
-            assert!(
-                msg.contains("GENERATED"),
-                "Should mention GENERATED: {msg}"
-            );
+            assert!(msg.contains("GENERATED"), "Should mention GENERATED: {msg}");
         }
         other => panic!("expected UnsupportedFeature, got: {other:?}"),
     }
@@ -1057,10 +1053,7 @@ async fn unsupported_generated_returns_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unsupported_triggers_returns_error() {
-    let db = turso::Builder::new_local(":memory:")
-        .build()
-        .await
-        .unwrap();
+    let db = turso::Builder::new_local(":memory:").build().await.unwrap();
     let conn = db.connect().unwrap();
 
     let schema = "\
@@ -1093,10 +1086,7 @@ async fn capabilities_detect_triggers_and_engine_features() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn capabilities_detect_triggers_disabled_without_flag() {
-    let db = turso::Builder::new_local(":memory:")
-        .build()
-        .await
-        .unwrap();
+    let db = turso::Builder::new_local(":memory:").build().await.unwrap();
     let conn = db.connect().unwrap();
     let caps = Capabilities::detect(&conn).await.unwrap();
     assert!(
@@ -1131,9 +1121,7 @@ async fn capabilities_override_skips_detection() {
         MigrateError::UnsupportedFeature(msg) => {
             assert!(msg.contains("FTS"), "Should mention FTS: {msg}");
         }
-        other => panic!(
-            "Override should block FTS even on capable DB, got: {other:?}"
-        ),
+        other => panic!("Override should block FTS even on capable DB, got: {other:?}"),
     }
 }
 
