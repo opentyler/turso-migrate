@@ -341,7 +341,7 @@ All operations return `Result<_, MigrateError>`:
 cargo test
 ```
 
-116 tests. In-memory Turso databases, no external services.
+152 tests. In-memory Turso databases, no external services.
 
 ## Full Documentation
 

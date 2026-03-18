@@ -1882,6 +1882,10 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 
 **FTS + triggers + materialized views require experimental Turso flags.** You must set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`. Without these flags, `MigrateError::UnsupportedFeature` is returned.
 
+**WITHOUT ROWID tables are not supported by Turso/libSQL.** The `detect_without_rowid` introspection exists in turso-converge for future compatibility, but Turso/libSQL (as of 3.50.4) returns `"WITHOUT ROWID tables are not supported"` at the parser level.
+
+**GENERATED columns are not supported by Turso/libSQL.** The `is_generated` column tracking exists in turso-converge for future compatibility, but Turso/libSQL (as of 3.50.4) returns `"GENERATED columns are not supported yet"` at the parser level.
+
 **Snapshot cache is process-wide.** The `from_schema_sql` cache uses a `OnceLock<Mutex<HashMap>>` and is cleared when it exceeds 16 entries. In long-running processes with many distinct schemas, cache churn may occur.
 
 **FK parser fallback is approximate.** The SQL-based foreign key parser (used when `PRAGMA foreign_key_list` returns nothing) parses `REFERENCES table_name` tokens. It correctly skips string literals and comments, but extracts only the referenced table name — not the referenced columns or ON DELETE/UPDATE actions.
@@ -1894,7 +1898,7 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 cargo test
 ```
 
-116 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, and connection abstraction wrappers.
+152 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement (all four policy fields), dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, unsupported feature detection, NoOp mode, migration lease contention, protected table namespace, data integrity verification, and index functionality verification.
 
 All tests use in-memory Turso databases — no external services, no network, no test fixtures to set up.
 
@@ -1903,12 +1907,12 @@ All tests use in-memory Turso databases — no external services, no network, no
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/converge.rs` | 25 | Core convergence, fast path, drift, crash recovery |
+| `tests/coverage.rs` | 36 | Policy edge cases, data migration errors, lease contention, AUTOINCREMENT, COLLATE, DROP COLUMN, STRICT tables, CIString, UnsupportedFeature, NoOp mode, data integrity, index verification |
 | `tests/execute.rs` | 26 | Three-phase execution, rebuild, FK checks, views |
 | `tests/diff.rs` | 23 | Diff computation, rename detection, SQL normalization |
 | `tests/new_api.rs` | 16 | `converge_with_options`, policy, dry-run, backup, hooks |
 | `tests/introspect.rs` | 12 | `table_xinfo`, batched introspection, snapshot caching |
 | `tests/triggers.rs` | 6 | Trigger creation, rebuild, drop |
-
 | `tests/migrator.rs` | 4 | End-to-end migration scenarios |
 | `tests/fuzz.rs` | 1 | Deterministic fuzzing of schema round-trips |
 | `src/bin/turso-converge.rs` | 1 | CLI trigger DDL support |

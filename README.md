@@ -466,13 +466,15 @@ This means:
 
 **FTS + triggers require experimental Turso flags.** Set `.experimental_index_method(true)`, `.experimental_materialized_views(true)`, and `.experimental_triggers(true)` on your `turso::Builder`.
 
+**WITHOUT ROWID and GENERATED columns are not supported by Turso/libSQL** (as of 3.50.4). turso-converge includes introspection support for future compatibility, but these features will fail at the Turso parser level.
+
 ## Running Tests
 
 ```bash
 cargo test
 ```
 
-116 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, and connection abstraction wrappers. In-memory Turso databases, no external services.
+152 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement (all four policy fields), dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, unsupported feature detection, NoOp mode, migration lease contention, protected table namespace, data integrity verification, and index functionality verification. In-memory Turso databases, no external services.
 
 ## CLI
 
