@@ -91,6 +91,52 @@ converge() called
          8. Release lease
 ```
 
+## The 12-Step Table Rebuild
+
+SQLite has limited native ALTER TABLE support (only RENAME TABLE, RENAME COLUMN, ADD COLUMN, and DROP COLUMN). For all other schema changes — modifying column types, adding/removing NOT NULL or DEFAULT, changing primary keys — SQLite's official documentation prescribes a [12-step procedure](https://www.sqlite.org/lang_altertable.html#otheralter) that creates a new table, copies data, drops the old table, and renames the new one. Getting the sequence wrong can corrupt foreign key references, orphan triggers, or break views.
+
+turso-converge follows this procedure for all table rebuilds. Here is how each step maps:
+
+| SQLite 12-Step | turso-converge | Notes |
+|----------------|----------------|-------|
+| **1. Disable FK constraints** (`PRAGMA foreign_keys=OFF`) | `PRAGMA defer_foreign_keys = ON` | Defers FK enforcement to transaction commit rather than disabling entirely. Resets automatically after the transaction. |
+| **2. Start a transaction** | `BEGIN IMMEDIATE` | Acquires a write lock upfront, preventing concurrent writers from causing `SQLITE_BUSY`. |
+| **3. Remember indexes, triggers, views** | Handled by introspection phase | `SchemaSnapshot::from_connection()` captures all indexes, triggers, and views from `sqlite_schema` before any DDL runs. The diff engine determines which need recreation. |
+| **4. CREATE TABLE "new_X"** | `CREATE TABLE "_converge_new_{table}_{seq}" (...)` | Rewrites the desired CREATE TABLE SQL to use a uniquely-suffixed temporary name. Uses the **correct** order (create new → copy → drop old → rename) as prescribed by SQLite docs, not the incorrect order (rename old → create new). |
+| **5. Copy data** | `INSERT INTO "_converge_new_..." (shared_cols) SELECT shared_cols FROM "{table}"` | Only copies columns that exist in both old and new schemas. GENERATED and hidden columns are excluded. New columns get their DEFAULT values. Removed columns are silently dropped. |
+| **6. Drop old table** | `DROP TABLE "{table}"` | |
+| **7. Rename new to old** | `ALTER TABLE "_converge_new_..." RENAME TO "{table}"` | |
+| **8. Recreate indexes** | Indexes on rebuilt tables are automatically added to the plan | The diff engine detects that indexes on rebuilt tables need recreation and adds them to the appropriate phase. |
+| **9. Recreate views and triggers** | Fixed-point view resolution + trigger recreation | Views use fixed-point resolution (retry on missing-dependency errors) to handle inter-view dependencies. Triggers on rebuilt tables are dropped before and recreated after the rebuild. |
+| **10. PRAGMA foreign_key_check** | `PRAGMA foreign_key_check` | Runs inside the transaction after all rebuilds. Violations cause a rollback and return `MigrateError::ForeignKeyViolation` with the table, rowid, and parent. |
+| **11. Commit transaction** | `COMMIT` | |
+| **12. Re-enable FK constraints** | Automatic | `defer_foreign_keys` resets to OFF after the transaction ends. |
+
+### Statement Ordering
+
+Beyond the 12-step rebuild, turso-converge orders all DDL carefully to avoid constraint violations:
+
+```
+Phase 1 (transactional — BEGIN IMMEDIATE ... COMMIT):
+  1. DROP triggers
+  2. DROP views (including those on rebuilt tables)
+  3. DROP indexes (including those on rebuilt tables)
+  4. DROP tables
+  5. CREATE new tables (FK-dependency topological order)
+  6. ALTER TABLE RENAME COLUMN
+  7. ALTER TABLE ADD COLUMN (O(1), nullable or with DEFAULT)
+  8. ALTER TABLE DROP COLUMN (O(1) when eligible)
+  9. Table rebuilds (steps 4-7 above, for each table)
+  10. CREATE indexes
+  11. CREATE views (fixed-point dependency resolution)
+  12. CREATE triggers
+Phase 2 (non-transactional):
+  13. DROP FTS indexes
+  14. CREATE FTS indexes
+```
+
+FTS indexes run outside transactions because Turso's tantivy-powered FTS engine cannot create indexes inside a transaction.
+
 ## API
 
 ### Simple — `converge`
