@@ -605,5 +605,5 @@ fn make_temp_table_name(table_name: &str) -> String {
             }
         })
         .collect();
-    format!("_converge_new_{}_{}", sanitized, seq)
+    format!("_converge_new_{sanitized}_{seq}")
 }

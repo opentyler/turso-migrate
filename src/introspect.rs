@@ -758,7 +758,7 @@ fn enrich_columns_with_collation(create_sql: &str, columns: &mut [ColumnInfo]) {
 
     for col in columns.iter_mut() {
         let col_lower = col.name.to_ascii_lowercase();
-        let search_quoted = format!("\"{}\"", col_lower);
+        let search_quoted = format!("\"{col_lower}\"");
 
         let relevant_section = find_column_section(&lower, &search_quoted)
             .or_else(|| find_column_section(&lower, &col_lower));
