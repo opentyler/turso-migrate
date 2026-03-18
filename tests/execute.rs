@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use turso_migrate::execute::{execute_plan, execute_plan_with_timeout};
-use turso_migrate::plan::generate_plan;
-use turso_migrate::{MigrationPlan, SchemaSnapshot, compute_diff};
+use turso_converge::execute::{execute_plan, execute_plan_with_timeout};
+use turso_converge::plan::generate_plan;
+use turso_converge::{MigrationPlan, SchemaSnapshot, compute_diff};
 
 fn test_schema() -> &'static str {
     include_str!("fixtures/schema.sql")

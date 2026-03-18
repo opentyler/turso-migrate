@@ -1,4 +1,4 @@
-use turso_migrate::SchemaSnapshot;
+use turso_converge::SchemaSnapshot;
 
 fn test_schema() -> &'static str {
     include_str!("fixtures/schema.sql")

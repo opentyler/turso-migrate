@@ -1,4 +1,4 @@
-use turso_migrate::{SchemaSnapshot, bridge_legacy, converge};
+use turso_converge::{SchemaSnapshot, bridge_legacy, converge};
 
 fn test_schema() -> &'static str {
     include_str!("fixtures/schema.sql")

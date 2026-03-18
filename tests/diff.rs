@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use turso_migrate::diff::{compute_diff, compute_diff_with_hints};
-use turso_migrate::{
+use turso_converge::diff::{compute_diff, compute_diff_with_hints};
+use turso_converge::{
     CIString, ColumnInfo, ColumnRenameHint, IndexInfo, SchemaSnapshot, TableInfo, ViewInfo,
 };
 
@@ -549,7 +549,7 @@ fn display_empty_diff() {
 
 #[test]
 fn normalize_preserves_string_literal_case() {
-    use turso_migrate::diff::normalize_for_hash;
+    use turso_converge::diff::normalize_for_hash;
     let sql = "SELECT * FROM t WHERE status = 'Active'";
     let normalized = normalize_for_hash(sql);
     assert!(
@@ -564,7 +564,7 @@ fn normalize_preserves_string_literal_case() {
 
 #[test]
 fn normalize_strips_comments() {
-    use turso_migrate::diff::normalize_for_hash;
+    use turso_converge::diff::normalize_for_hash;
     let sql = "CREATE TABLE foo ( -- this is a comment\n  id TEXT PRIMARY KEY\n)";
     let normalized = normalize_for_hash(sql);
     assert!(
@@ -579,7 +579,7 @@ fn normalize_strips_comments() {
 
 #[test]
 fn normalize_strips_block_comments() {
-    use turso_migrate::diff::normalize_for_hash;
+    use turso_converge::diff::normalize_for_hash;
     let sql = "CREATE TABLE /* multi\nline\ncomment */ foo (id TEXT)";
     let normalized = normalize_for_hash(sql);
     assert!(
@@ -590,7 +590,7 @@ fn normalize_strips_block_comments() {
 
 #[test]
 fn normalize_handles_escaped_quotes() {
-    use turso_migrate::diff::normalize_for_hash;
+    use turso_converge::diff::normalize_for_hash;
     let sql = "INSERT INTO t VALUES ('it''s a test')";
     let normalized = normalize_for_hash(sql);
     assert!(

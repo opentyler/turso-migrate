@@ -1,6 +1,6 @@
 use tempfile::tempdir;
-use turso_migrate::diff::normalize_for_hash;
-use turso_migrate::{
+use turso_converge::diff::normalize_for_hash;
+use turso_converge::{
     ConvergeMode, ConvergeOptions, ConvergePolicy, DataMigration, Failpoint, MigrateError,
     SchemaSnapshot, converge, converge_with_options, rollback_to_previous, schema_version,
 };

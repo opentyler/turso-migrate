@@ -1,8 +1,8 @@
-# turso-migrate Production Readiness Review
+# turso-converge Production Readiness Review
 
 **Date**: 2026-03-18
 **Reviewer**: Automated multi-agent review (Sisyphus + Oracle)
-**Codebase**: turso-migrate v0.1.0 @ main
+**Codebase**: turso-converge v0.1.0 @ main
 **Test Baseline**: 117 tests, all passing
 
 ## Final Hardening Pass (2026-03-18)
@@ -30,13 +30,13 @@ Validation added with targeted regression tests in:
 
 - `tests/converge.rs` (pre/post-DDL failpoint behavior, overflow)
 - `tests/execute.rs` (defensive temp-table drop assertion)
-- `src/bin/turso-migrate.rs` (CLI local connection trigger DDL support)
+- `src/bin/turso-converge.rs` (CLI local connection trigger DDL support)
 
 ---
 
 ## Executive Summary
 
-turso-migrate is a well-architected declarative schema convergence library with a solid core algorithm. The BLAKE3 fast-path, 3-phase execution model, and 12-step ALTER TABLE procedure are correctly implemented. However, several gaps exist that should be addressed before production hardening.
+turso-converge is a well-architected declarative schema convergence library with a solid core algorithm. The BLAKE3 fast-path, 3-phase execution model, and 12-step ALTER TABLE procedure are correctly implemented. However, several gaps exist that should be addressed before production hardening.
 
 **Severity Legend**: P0 = must fix before production, P1 = should fix soon, P2 = improvement, P3 = nice to have
 

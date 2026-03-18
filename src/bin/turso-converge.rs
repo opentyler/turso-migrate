@@ -1,7 +1,7 @@
 use std::env;
 use std::path::Path;
 
-use turso_migrate::{
+use turso_converge::{
     ConvergeOptions, ConvergePolicy, SchemaSnapshot, compute_diff, converge, converge_with_options,
     validate_schema,
 };
@@ -130,7 +130,7 @@ async fn open_local_connection(path: &str) -> Result<turso::Connection, String> 
 
 fn print_usage() {
     println!(
-        "turso-migrate <command> [args]\n\nCommands:\n  validate <schema.sql>\n  diff <db-path> <schema.sql>\n  plan <db-path> <schema.sql>\n  check <db-path> <schema.sql>\n  apply <db-path> <schema.sql>"
+        "turso-converge <command> [args]\n\nCommands:\n  validate <schema.sql>\n  diff <db-path> <schema.sql>\n  plan <db-path> <schema.sql>\n  check <db-path> <schema.sql>\n  apply <db-path> <schema.sql>"
     );
 }
 

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use tempfile::tempdir;
-use turso_migrate::{
+use turso_converge::{
     ConnectionLike, ConvergeMode, ConvergeOptions, ConvergePolicy, MigrateError, SchemaSnapshot,
     converge, converge_from_path, converge_like, converge_multi, converge_multi_with_options,
     is_read_only, schema_version_like, validate_schema,

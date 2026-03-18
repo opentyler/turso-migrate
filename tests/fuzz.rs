@@ -1,4 +1,4 @@
-use turso_migrate::{SchemaSnapshot, compute_diff, converge};
+use turso_converge::{SchemaSnapshot, compute_diff, converge};
 
 async fn empty_db() -> (turso::Database, turso::Connection) {
     let db = turso::Builder::new_local(":memory:")

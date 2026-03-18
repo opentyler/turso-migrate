@@ -1,10 +1,10 @@
 [package]
-name = "turso-migrate"
+name = "turso-converge"
 version = "0.1.0"
 description = "Declarative schema convergence for Turso databases"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/opentyler/turso-migrate"
+repository = "https://github.com/opentyler/turso-converge"
 rust-version = "1.85"
 authors = ["Tyler <tyler@root-platform.app>"]
 publish = false

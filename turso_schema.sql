@@ -1,6 +1,6 @@
 -- turso_schema.sql: Canonical schema for per-user Turso databases
 -- This is the single source of truth. Edit this file to change the schema.
--- The turso-migrate crate will automatically converge live databases to match.
+-- The turso-converge crate will automatically converge live databases to match.
 
 ------------------------------------------------------------
 -- Tables

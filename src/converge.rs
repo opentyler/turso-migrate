@@ -675,7 +675,7 @@ async fn write_schema_backup(path_hint: &Path, schema_sql: &str) -> Result<(), M
                 path: path_hint.to_path_buf(),
                 source,
             })?;
-        path_hint.join(format!("turso_migrate_backup_{}.sql", epoch_secs()))
+        path_hint.join(format!("turso_converge_backup_{}.sql", epoch_secs()))
     } else {
         if let Some(parent) = path_hint.parent()
             && !parent.as_os_str().is_empty()

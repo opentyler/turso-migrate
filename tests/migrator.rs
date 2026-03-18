@@ -1,4 +1,4 @@
-use turso_migrate::{
+use turso_converge::{
     ConvergeMode, ConvergeOptions, ConvergePolicy, SchemaSnapshot, converge_with_options,
 };
 
