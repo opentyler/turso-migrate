@@ -120,13 +120,11 @@ async fn run_ddl_transaction(
         return Ok(());
     }
 
-    if has_rebuilds {
-        if let Err(e) = conn.execute("PRAGMA defer_foreign_keys = ON", ()).await {
-            tracing::warn!(
-                error = %e,
-                "defer_foreign_keys not supported; self-referential FK rebuilds may fail"
-            );
-        }
+    if has_rebuilds && let Err(e) = conn.execute("PRAGMA defer_foreign_keys = ON", ()).await {
+        tracing::warn!(
+            error = %e,
+            "defer_foreign_keys not supported; self-referential FK rebuilds may fail"
+        );
     }
 
     conn.execute("BEGIN IMMEDIATE", ()).await?;
@@ -142,11 +140,9 @@ async fn run_ddl_transaction(
         }
     }
 
-    if has_rebuilds {
-        if let Err(violation) = check_foreign_keys(conn).await {
-            rollback(conn).await;
-            return Err(violation);
-        }
+    if has_rebuilds && let Err(violation) = check_foreign_keys(conn).await {
+        rollback(conn).await;
+        return Err(violation);
     }
 
     if let Err(err) = conn.execute("COMMIT", ()).await {

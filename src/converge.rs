@@ -132,13 +132,13 @@ async fn run_slow_path(
             write_schema_backup(target, &actual.to_sql()).await?;
         }
 
-        if let Some(hook) = &options.pre_destructive_hook {
-            if destructive.has_changes() {
-                hook(&destructive).map_err(|message| MigrateError::PreDestructiveHookRejected {
-                    message,
-                    blocked_operations: destructive.blocked_operations(),
-                })?;
-            }
+        if let Some(hook) = &options.pre_destructive_hook
+            && destructive.has_changes()
+        {
+            hook(&destructive).map_err(|message| MigrateError::PreDestructiveHookRejected {
+                message,
+                blocked_operations: destructive.blocked_operations(),
+            })?;
         }
 
         validate_features(&desired, &caps)?;
@@ -438,11 +438,11 @@ async fn acquire_lease(conn: &turso::Connection) -> Result<String, MigrateError>
 }
 
 async fn release_lease(conn: &turso::Connection, lease_id: &str) {
-    if let Ok(Some(current)) = get_meta(conn, "migration_owner").await {
-        if current == lease_id {
-            let _ = delete_meta(conn, "migration_owner").await;
-            let _ = delete_meta(conn, "migration_lease_until").await;
-        }
+    if let Ok(Some(current)) = get_meta(conn, "migration_owner").await
+        && current == lease_id
+    {
+        let _ = delete_meta(conn, "migration_owner").await;
+        let _ = delete_meta(conn, "migration_lease_until").await;
     }
 }
 
@@ -560,11 +560,11 @@ async fn update_state_atomically(
         }
 
         let sv_result = conn.query("PRAGMA schema_version", ()).await;
-        if let Ok(mut rows) = sv_result {
-            if let Ok(Some(row)) = rows.next().await {
-                let sv: i64 = row.get(0).unwrap_or(0);
-                set_meta(conn, "sqlite_schema_version", &sv.to_string()).await?;
-            }
+        if let Ok(mut rows) = sv_result
+            && let Ok(Some(row)) = rows.next().await
+        {
+            let sv: i64 = row.get(0).unwrap_or(0);
+            set_meta(conn, "sqlite_schema_version", &sv.to_string()).await?;
         }
 
         Ok::<(), MigrateError>(())

@@ -763,16 +763,16 @@ fn enrich_columns_with_collation(create_sql: &str, columns: &mut [ColumnInfo]) {
         let relevant_section = find_column_section(&lower, &search_quoted)
             .or_else(|| find_column_section(&lower, &col_lower));
 
-        if let Some(section) = relevant_section {
-            if let Some(pos) = section.find("collate") {
-                let after = section[pos + "collate".len()..].trim_start();
-                let collation: String = after
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .collect();
-                if !collation.is_empty() {
-                    col.collation = Some(collation.to_ascii_uppercase());
-                }
+        if let Some(section) = relevant_section
+            && let Some(pos) = section.find("collate")
+        {
+            let after = section[pos + "collate".len()..].trim_start();
+            let collation: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !collation.is_empty() {
+                col.collation = Some(collation.to_ascii_uppercase());
             }
         }
     }

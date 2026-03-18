@@ -5,7 +5,7 @@ description = "Declarative schema convergence for Turso databases"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/opentyler/turso-converge"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Tyler <tyler@root-platform.app>"]
 publish = false
 
