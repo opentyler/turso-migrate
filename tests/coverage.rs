@@ -1052,7 +1052,7 @@ async fn unsupported_generated_returns_error() {
 // ── Capability validation: triggers ────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unsupported_triggers_returns_error() {
+async fn triggers_work_without_experimental_flag() {
     let db = turso::Builder::new_local(":memory:").build().await.unwrap();
     let conn = db.connect().unwrap();
 
@@ -1060,16 +1060,8 @@ async fn unsupported_triggers_returns_error() {
         CREATE TABLE users (id TEXT PRIMARY KEY);\n\
         CREATE TRIGGER trg_ins AFTER INSERT ON users BEGIN SELECT 1; END;";
 
-    let err = converge(&conn, schema).await.unwrap_err();
-    match err {
-        MigrateError::UnsupportedFeature(msg) => {
-            assert!(
-                msg.to_lowercase().contains("trigger"),
-                "Should mention triggers: {msg}"
-            );
-        }
-        other => panic!("expected UnsupportedFeature, got: {other:?}"),
-    }
+    // Triggers are supported by default in turso 0.6.x — no experimental flag needed.
+    converge(&conn, schema).await.unwrap();
 }
 
 // ── Capability detection: new fields ───────────────────────────────
@@ -1085,13 +1077,14 @@ async fn capabilities_detect_triggers_and_engine_features() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn capabilities_detect_triggers_disabled_without_flag() {
+async fn capabilities_detect_triggers_enabled_by_default() {
     let db = turso::Builder::new_local(":memory:").build().await.unwrap();
     let conn = db.connect().unwrap();
     let caps = Capabilities::detect(&conn).await.unwrap();
+    // Triggers are supported by default in turso 0.6.x — no experimental flag needed.
     assert!(
-        !caps.has_triggers,
-        "DB without experimental_triggers flag should not have trigger support"
+        caps.has_triggers,
+        "DB should have trigger support by default in turso 0.6.x"
     );
 }
 

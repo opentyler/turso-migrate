@@ -10,8 +10,8 @@ authors = ["Tyler <tyler@root-platform.app>"]
 publish = false
 
 [dependencies]
-turso = { version = "0.5.0-pre.13", features = ["sync"] }
-turso_core = { version = "0.5.0-pre.13", features = ["fts", "fs", "conn_raw_api"] }
+turso = { version = "0.6.0-pre.3", features = ["sync"] }
+turso_core = { version = "0.6.0-pre.3", features = ["fts", "fs", "conn_raw_api"] }
 blake3 = "1"
 tracing = "0.1"
 thiserror = "2"
