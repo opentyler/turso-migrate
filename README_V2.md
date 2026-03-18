@@ -140,7 +140,7 @@ for stmt in &report.plan_sql {
 | `rollback_to_previous(&conn)` | Re-converge to the previous schema snapshot |
 | `is_read_only(&conn)` | Check if connection is read-only |
 | `compute_diff(&desired, &actual)` | Compute diff between two `SchemaSnapshot`s |
-| `bridge_legacy(&conn)` | Detect and bridge legacy `_turso_migrations` table |
+
 
 ## Policy — Destructive Change Protection
 
@@ -340,7 +340,7 @@ All operations return `Result<_, MigrateError>`:
 cargo test
 ```
 
-120 tests. In-memory Turso databases, no external services.
+116 tests. In-memory Turso databases, no external services.
 
 ## Full Documentation
 

@@ -1,4 +1,3 @@
-pub mod bridge;
 pub mod connection;
 pub mod converge;
 pub mod diff;
@@ -9,7 +8,6 @@ pub mod options;
 pub mod plan;
 pub mod schema;
 
-pub use bridge::bridge_legacy;
 pub use connection::{
     ConnectionLike, converge_like, converge_like_with_options, schema_version_like,
 };

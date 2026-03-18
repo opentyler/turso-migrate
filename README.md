@@ -472,7 +472,7 @@ This means:
 cargo test
 ```
 
-120 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
+116 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, and connection abstraction wrappers. In-memory Turso databases, no external services.
 
 ## CLI
 

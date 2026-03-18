@@ -19,7 +19,7 @@ impl SchemaSnapshot {
                 "SELECT name, sql FROM sqlite_schema \
                  WHERE type = 'table' \
                    AND name NOT LIKE 'sqlite_%' \
-                   AND name NOT IN ('_schema_meta', '_turso_migrations') \
+                   AND name != '_schema_meta' \
                  ORDER BY name",
                 (),
             )
@@ -375,8 +375,7 @@ fn parse_version(s: &str) -> (u32, u32, u32) {
 }
 
 fn is_meta_table(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower == "_schema_meta" || lower == "_turso_migrations"
+    name.eq_ignore_ascii_case("_schema_meta")
 }
 
 fn is_materialized_view_sql(sql: &str) -> bool {
@@ -395,7 +394,6 @@ fn is_internal_object(name: &str) -> bool {
         || lower.starts_with("_cap_probe_")
         || lower.starts_with("sqlite_autoindex_")
         || lower == "_schema_meta"
-        || lower == "_turso_migrations"
         || lower.starts_with("_converge_new_")
 }
 
@@ -445,7 +443,7 @@ async fn table_columns_xinfo_batched(
              JOIN pragma_table_xinfo(m.name) p \
              WHERE m.type = 'table' \
                AND m.name NOT LIKE 'sqlite_%' \
-               AND m.name NOT IN ('_schema_meta', '_turso_migrations') \
+               AND m.name != '_schema_meta' \
                AND m.name NOT LIKE '_converge_new_%' \
              ORDER BY m.name, p.cid",
             (),

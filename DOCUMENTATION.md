@@ -26,7 +26,6 @@
   - [compute_diff](#compute_diff)
   - [generate_plan](#generate_plan)
   - [execute_plan](#execute_plan)
-  - [bridge_legacy](#bridge_legacy)
 - [Configuration Reference](#configuration-reference)
   - [ConvergeOptions](#convergeoptions)
   - [ConvergePolicy](#convergepolicy)
@@ -530,20 +529,6 @@ pub async fn execute_plan(
 Executes a migration plan with the default 5-second busy timeout and no lease verification. This is a lower-level API; most users should use `converge` or `converge_with_options` instead.
 
 **Source:** [`src/execute.rs:7-12`](src/execute.rs)
-
----
-
-### `bridge_legacy`
-
-```rust
-pub async fn bridge_legacy(conn: &turso::Connection) -> Result<bool, MigrateError>
-```
-
-Detects the presence of a legacy `_turso_migrations` table and marks it as bridged in `_schema_meta`. Returns `true` if a legacy table was found and newly bridged, `false` if no legacy table exists or it was already bridged.
-
-Use this when migrating from an older migration system to turso-converge.
-
-**Source:** [`src/bridge.rs:4-19`](src/bridge.rs)
 
 ---
 
@@ -1409,7 +1394,7 @@ The migration planner never drops tables matching these patterns:
 | `sqlite_*` | SQLite internal tables |
 | `fts_dir_*` | Turso FTS internal tables |
 | `__turso_internal*` | Turso internal tables |
-| `_turso_migrations` | Legacy migration table |
+
 
 Source: [`src/plan.rs:577-585`](src/plan.rs) (`is_protected_table`)
 
@@ -1599,7 +1584,7 @@ Database introspection is implemented in [`src/introspect.rs`](src/introspect.rs
 
 **Internal object filtering:** Objects with names matching these patterns are excluded:
 - `sqlite_*`, `sqlite_autoindex_*` — SQLite internal objects
-- `_schema_meta`, `_turso_migrations` — turso-converge internal tables
+- `_schema_meta` — turso-converge internal state table
 - `_converge_new_*` — Temporary rebuild tables
 - `_cap_probe_*` — Capability probe artifacts
 - `fts_dir_*`, `__turso_internal*` — Turso internal objects
@@ -1633,7 +1618,7 @@ Database introspection is implemented in [`src/introspect.rs`](src/introspect.rs
 4. FTS indexes are emitted after standard indexes.
 5. Views are emitted after all indexes.
 6. Triggers are emitted last.
-7. Internal tables (`_schema_meta`, `_turso_migrations`) are excluded.
+7. Internal tables (`_schema_meta`) are excluded.
 
 ---
 
@@ -1746,7 +1731,7 @@ CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NU
 | `migration_lease_until` | Lease expiry as epoch seconds. TTL is 300 seconds (5 minutes). |
 | `data_migration:{id}` | Epoch seconds when this data migration was applied. Prevents re-application. |
 | `autoincrement_seq_{table}` | Temporary storage for AUTOINCREMENT sequence values during table rebuilds. Cleaned up after use. |
-| `legacy_complete` | Set to `"1"` by `bridge_legacy` when a `_turso_migrations` table is detected and bridged. |
+
 
 turso-converge also maintains a `schema_version` table for user-facing version tracking:
 
@@ -1774,7 +1759,6 @@ src/
 ├── options.rs      — Configuration types (ConvergeOptions, ConvergePolicy, ConvergeReport)
 ├── error.rs        — MigrateError enum
 ├── connection.rs   — ConnectionLike trait and wrapper functions
-├── bridge.rs       — Legacy migration table bridge
 └── bin/
     └── turso-converge.rs  — CLI binary (validate/diff/plan/check/apply)
 ```
@@ -1884,7 +1868,7 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 cargo test
 ```
 
-120 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, and the legacy bridge.
+116 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, and connection abstraction wrappers.
 
 All tests use in-memory Turso databases — no external services, no network, no test fixtures to set up.
 
@@ -1898,7 +1882,7 @@ All tests use in-memory Turso databases — no external services, no network, no
 | `tests/new_api.rs` | 16 | `converge_with_options`, policy, dry-run, backup, hooks |
 | `tests/introspect.rs` | 12 | `table_xinfo`, batched introspection, snapshot caching |
 | `tests/triggers.rs` | 6 | Trigger creation, rebuild, drop |
-| `tests/bridge.rs` | 4 | Legacy bridge detection and marking |
+
 | `tests/migrator.rs` | 4 | End-to-end migration scenarios |
 | `tests/fuzz.rs` | 1 | Deterministic fuzzing of schema round-trips |
 | `src/bin/turso-converge.rs` | 1 | CLI trigger DDL support |

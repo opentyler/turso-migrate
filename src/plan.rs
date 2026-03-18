@@ -581,7 +581,6 @@ fn is_protected_table(name: &str) -> bool {
         || lower.starts_with("sqlite_")
         || lower.starts_with("fts_dir_")
         || lower.starts_with("__turso_internal")
-        || lower == "_turso_migrations"
 }
 
 fn view_depends_on_table(view_sql: &str, table_name: &str) -> bool {
