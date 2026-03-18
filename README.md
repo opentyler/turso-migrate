@@ -211,7 +211,7 @@ turso_converge::validate_schema(include_str!("../turso_schema.sql")).await?;
 For codebases that wrap `turso::Connection`, use:
 
 ```rust
-use turso_converge::{ConnectionLike, converge_like, schema_version_like};
+use turso_converge::{ConnectionLike, converge_like, converge_like_with_options, schema_version_like};
 ```
 
 ### `DataMigration` — Idempotent Post-DDL Data Steps
@@ -305,7 +305,7 @@ On each database connection:
     4. Mismatch → full convergence:
        a. Build pristine snapshot (in-memory Turso DB from schema SQL)
        b. Introspect actual database (sqlite_schema + PRAGMA table_xinfo)
-       c. Compute diff (12 categories)
+       c. Compute diff (14 categories)
        d. Check policy (block destructive changes if configured)
        e. Validate rebuild safety (NOT NULL columns require DEFAULT)
        f. Generate migration plan (FK-ordered, capability-aware)
@@ -397,6 +397,8 @@ turso-converge uses a rich internal schema representation:
 - **`TableInfo`** — Columns, foreign keys, STRICT/WITHOUT ROWID/AUTOINCREMENT flags
 - **`ColumnInfo`** — Type, nullability, default, primary key, collation, generated/hidden status
 - **`IndexInfo`** — Table, SQL, FTS flag, UNIQUE flag, indexed columns
+- **`ViewInfo`** — Name, SQL, materialized view flag
+- **`TriggerInfo`** — Name, attached table, SQL
 - **`ForeignKey`** — From/to columns, referenced table, ON DELETE/UPDATE actions
 - **`Capabilities`** — Detected SQLite version and available features
 
@@ -470,7 +472,7 @@ This means:
 cargo test
 ```
 
-117 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
+120 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement, dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, and the legacy bridge. In-memory Turso databases, no external services.
 
 ## CLI
 
