@@ -68,6 +68,7 @@ impl std::hash::Hash for CIString {
     }
 }
 
+/// Complete schema representation: tables, indexes, views, and triggers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaSnapshot {
     pub tables: BTreeMap<CIString, TableInfo>,
@@ -111,6 +112,7 @@ impl SchemaSnapshot {
     }
 }
 
+/// Parsed table metadata: columns, foreign keys, and SQLite table options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableInfo {
     pub name: String,
@@ -132,6 +134,7 @@ impl TableInfo {
     }
 }
 
+/// Column metadata from `PRAGMA table_xinfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnInfo {
     pub name: String,
@@ -155,6 +158,7 @@ impl ColumnInfo {
     }
 }
 
+/// Foreign key constraint with source/target columns and actions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKey {
     pub from_columns: Vec<String>,
@@ -164,6 +168,7 @@ pub struct ForeignKey {
     pub on_update: String,
 }
 
+/// Index metadata including FTS and UNIQUE flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexInfo {
     pub name: String,
@@ -174,6 +179,7 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
 }
 
+/// View metadata with materialized view detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewInfo {
     pub name: String,
@@ -181,6 +187,7 @@ pub struct ViewInfo {
     pub is_materialized: bool,
 }
 
+/// Trigger metadata: name, attached table, and DDL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerInfo {
     pub name: String,

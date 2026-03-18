@@ -1,3 +1,5 @@
+mod common;
+
 use std::path::PathBuf;
 
 use tempfile::tempdir;
@@ -7,25 +9,10 @@ use turso_converge::{
     is_read_only, schema_version_like, validate_schema,
 };
 
-fn test_schema() -> &'static str {
-    include_str!("fixtures/schema.sql")
-}
-
-async fn empty_db() -> (turso::Database, turso::Connection) {
-    let db = turso::Builder::new_local(":memory:")
-        .experimental_index_method(true)
-        .experimental_materialized_views(true)
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    (db, conn)
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_creates_tables() {
-    let (_db, conn) = empty_db().await;
-    converge(&conn, test_schema()).await.unwrap();
+    let (_db, conn) = common::empty_db().await;
+    converge(&conn, common::test_schema()).await.unwrap();
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert_eq!(snap.tables.len(), 10);
@@ -33,9 +20,9 @@ async fn converge_creates_tables() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_is_idempotent() {
-    let (_db, conn) = empty_db().await;
-    converge(&conn, test_schema()).await.unwrap();
-    converge(&conn, test_schema()).await.unwrap();
+    let (_db, conn) = common::empty_db().await;
+    converge(&conn, common::test_schema()).await.unwrap();
+    converge(&conn, common::test_schema()).await.unwrap();
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert_eq!(snap.tables.len(), 10);
@@ -43,7 +30,7 @@ async fn converge_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_empty_sql_errors() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let err = converge(&conn, "").await.unwrap_err();
 
     match err {
@@ -54,7 +41,7 @@ async fn converge_empty_sql_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_invalid_sql_errors() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let err = converge(&conn, "NOT VALID SQL").await.unwrap_err();
     assert!(
         matches!(err, MigrateError::Turso(_) | MigrateError::Statement { .. }),
@@ -64,10 +51,10 @@ async fn converge_invalid_sql_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_from_path_works() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let dir = tempdir().unwrap();
     let schema_path = dir.path().join("schema.sql");
-    std::fs::write(&schema_path, test_schema()).unwrap();
+    std::fs::write(&schema_path, common::test_schema()).unwrap();
 
     converge_from_path(&conn, &schema_path).await.unwrap();
 
@@ -77,7 +64,7 @@ async fn converge_from_path_works() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_from_path_missing_file() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let missing = PathBuf::from("/definitely/missing/schema.sql");
 
     let err = converge_from_path(&conn, &missing).await.unwrap_err();
@@ -89,13 +76,13 @@ async fn converge_from_path_missing_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn to_sql_round_trips() {
-    let (_db1, conn1) = empty_db().await;
-    conn1.execute_batch(test_schema()).await.unwrap();
+    let (_db1, conn1) = common::empty_db().await;
+    conn1.execute_batch(common::test_schema()).await.unwrap();
     let snap1 = SchemaSnapshot::from_connection(&conn1).await.unwrap();
 
     let sql = snap1.to_sql();
 
-    let (_db2, conn2) = empty_db().await;
+    let (_db2, conn2) = common::empty_db().await;
     conn2.execute_batch(&sql).await.unwrap();
     let snap2 = SchemaSnapshot::from_connection(&conn2).await.unwrap();
 
@@ -106,8 +93,8 @@ async fn to_sql_round_trips() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn to_sql_fk_order() {
-    let (_db, conn) = empty_db().await;
-    conn.execute_batch(test_schema()).await.unwrap();
+    let (_db, conn) = common::empty_db().await;
+    conn.execute_batch(common::test_schema()).await.unwrap();
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     let sql = snap.to_sql();
 
@@ -118,11 +105,11 @@ async fn to_sql_fk_order() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn to_sql_output_is_executable() {
-    let (_db1, conn1) = empty_db().await;
-    conn1.execute_batch(test_schema()).await.unwrap();
+    let (_db1, conn1) = common::empty_db().await;
+    conn1.execute_batch(common::test_schema()).await.unwrap();
     let snap = SchemaSnapshot::from_connection(&conn1).await.unwrap();
 
-    let (_db2, conn2) = empty_db().await;
+    let (_db2, conn2) = common::empty_db().await;
     conn2.execute_batch(&snap.to_sql()).await.unwrap();
 }
 
@@ -140,7 +127,7 @@ async fn to_sql_empty_snapshot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_schema_accepts_valid_sql() {
-    validate_schema(test_schema()).await.unwrap();
+    validate_schema(common::test_schema()).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -151,7 +138,7 @@ async fn validate_schema_rejects_invalid_sql() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_multi_combines_schema_parts() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let parts = [
         "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);",
         "CREATE TABLE posts (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id));",
@@ -168,7 +155,7 @@ async fn converge_multi_combines_schema_parts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_multi_with_options_supports_dry_run() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let parts = [
         "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);",
         "CREATE TABLE posts (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id));",
@@ -192,7 +179,7 @@ async fn converge_multi_with_options_supports_dry_run() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn is_read_only_reflects_query_only_pragma() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     assert!(!is_read_only(&conn).await.unwrap());
 
     conn.execute("PRAGMA query_only = 1", ()).await.unwrap();
@@ -212,10 +199,12 @@ impl ConnectionLike for WrappedConnection<'_> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn connection_like_wrappers_work() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let wrapped = WrappedConnection { inner: &conn };
 
-    converge_like(&wrapped, test_schema()).await.unwrap();
+    converge_like(&wrapped, common::test_schema())
+        .await
+        .unwrap();
     let version = schema_version_like(&wrapped).await.unwrap();
     assert_eq!(version, 1);
 }

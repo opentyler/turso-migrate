@@ -9,6 +9,7 @@ use crate::options::{
 use crate::schema::{Capabilities, SchemaSnapshot};
 use crate::{MigrateError, generate_plan};
 
+/// Converge database to match `schema_sql` using a permissive policy (allows all changes).
 pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), MigrateError> {
     let options = ConvergeOptions {
         policy: ConvergePolicy::permissive(),
@@ -18,6 +19,7 @@ pub async fn converge(conn: &turso::Connection, schema_sql: &str) -> Result<(), 
     Ok(())
 }
 
+/// Converge database to match `schema_sql` with full policy, dry-run, and reporting support.
 pub async fn converge_with_options(
     conn: &turso::Connection,
     schema_sql: &str,
@@ -441,6 +443,7 @@ async fn detect_drift(conn: &turso::Connection) -> Result<bool, MigrateError> {
     Ok(true)
 }
 
+/// BLAKE3 fingerprint of the live database schema (for drift detection).
 pub async fn schema_fingerprint(conn: &turso::Connection) -> Result<String, MigrateError> {
     let mut rows = conn
         .query(
@@ -502,6 +505,7 @@ async fn update_state_atomically(
     Ok(())
 }
 
+/// Re-converge to the schema snapshot stored before the last migration.
 pub async fn rollback_to_previous(conn: &turso::Connection) -> Result<(), MigrateError> {
     bootstrap_schema_meta(conn).await?;
     let prev = get_meta(conn, "previous_schema_sql").await?;
@@ -513,6 +517,7 @@ pub async fn rollback_to_previous(conn: &turso::Connection) -> Result<(), Migrat
     }
 }
 
+/// Validate schema SQL by executing it against an in-memory database.
 pub async fn validate_schema(schema_sql: &str) -> Result<(), MigrateError> {
     if schema_sql.trim().is_empty() {
         return Err(MigrateError::Schema("empty schema SQL".into()));
@@ -522,6 +527,7 @@ pub async fn validate_schema(schema_sql: &str) -> Result<(), MigrateError> {
         .map_err(|e| MigrateError::Schema(format!("Schema validation failed: {e}")))
 }
 
+/// Converge from multiple SQL fragments concatenated in order.
 pub async fn converge_multi(
     conn: &turso::Connection,
     schema_parts: &[&str],
@@ -530,6 +536,7 @@ pub async fn converge_multi(
     converge(conn, &combined).await
 }
 
+/// Converge from multiple SQL fragments with full options.
 pub async fn converge_multi_with_options(
     conn: &turso::Connection,
     schema_parts: &[&str],
@@ -539,6 +546,7 @@ pub async fn converge_multi_with_options(
     converge_with_options(conn, &combined, options).await
 }
 
+/// Returns `true` if the connection is in read-only / replica mode.
 pub async fn is_read_only(conn: &turso::Connection) -> Result<bool, MigrateError> {
     let mut rows = conn.query("PRAGMA query_only", ()).await?;
     if let Some(row) = rows.next().await? {
@@ -549,6 +557,7 @@ pub async fn is_read_only(conn: &turso::Connection) -> Result<bool, MigrateError
     }
 }
 
+/// Read schema SQL from a file path and converge.
 pub async fn converge_from_path(
     conn: &turso::Connection,
     path: impl AsRef<Path>,
@@ -563,6 +572,7 @@ pub async fn converge_from_path(
     converge(conn, &contents).await
 }
 
+/// Current schema version counter (incremented each time DDL is applied).
 pub async fn schema_version(conn: &turso::Connection) -> Result<u32, MigrateError> {
     let mut rows = conn
         .query("SELECT version FROM schema_version LIMIT 1", ())

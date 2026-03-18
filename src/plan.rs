@@ -5,6 +5,7 @@ use crate::diff::SchemaDiff;
 use crate::error::MigrateError;
 use crate::schema::{ColumnInfo, SchemaSnapshot};
 
+/// Ordered DDL statements partitioned into transactional and non-transactional phases.
 #[derive(Debug, Clone)]
 pub struct MigrationPlan {
     pub new_tables: Vec<String>,
@@ -24,6 +25,7 @@ impl MigrationPlan {
     }
 }
 
+/// Generate an FK-ordered migration plan from a schema diff.
 pub fn generate_plan(
     diff: &SchemaDiff,
     desired: &SchemaSnapshot,

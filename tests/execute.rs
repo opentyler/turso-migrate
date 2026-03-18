@@ -1,23 +1,10 @@
+mod common;
+
 use std::time::Duration;
 
 use turso_converge::execute::{execute_plan, execute_plan_with_timeout};
 use turso_converge::plan::generate_plan;
 use turso_converge::{MigrationPlan, SchemaSnapshot, compute_diff};
-
-fn test_schema() -> &'static str {
-    include_str!("fixtures/schema.sql")
-}
-
-async fn empty_db() -> (turso::Database, turso::Connection) {
-    let db = turso::Builder::new_local(":memory:")
-        .experimental_index_method(true)
-        .experimental_materialized_views(true)
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    (db, conn)
-}
 
 fn non_transactional_plan(stmt: &str) -> MigrationPlan {
     MigrationPlan {
@@ -33,10 +20,10 @@ fn non_transactional_plan(stmt: &str) -> MigrationPlan {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn fresh_db_convergence() {
-    let (_db, conn) = empty_db().await;
-    let desired = SchemaSnapshot::from_schema_sql(test_schema())
+    let (_db, conn) = common::empty_db().await;
+    let desired = SchemaSnapshot::from_schema_sql(common::test_schema())
         .await
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
@@ -62,10 +49,10 @@ async fn fresh_db_convergence() {
     assert_eq!(after.tables.len(), desired.tables.len());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn idempotent_convergence() {
-    let (_db, conn) = empty_db().await;
-    let desired = SchemaSnapshot::from_schema_sql(test_schema())
+    let (_db, conn) = common::empty_db().await;
+    let desired = SchemaSnapshot::from_schema_sql(common::test_schema())
         .await
         .unwrap();
 
@@ -79,9 +66,9 @@ async fn idempotent_convergence() {
     assert!(diff2.is_empty(), "Second diff should be empty: {diff2:?}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn add_column_execution() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
         (),
@@ -103,9 +90,9 @@ async fn add_column_execution() {
     assert!(foo.columns.iter().any(|c| c.name == "extra"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_column_execution_preserves_data() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE foo (id TEXT PRIMARY KEY, legacy_name TEXT NOT NULL)",
         (),
@@ -142,9 +129,9 @@ async fn rename_column_execution_preserves_data() {
     assert_eq!(row.get::<String>(1).unwrap(), "alice");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn table_rebuild_preserves_data() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, legacy TEXT)",
         (),
@@ -186,9 +173,9 @@ async fn table_rebuild_preserves_data() {
     assert!(!foo.columns.iter().any(|c| c.name == "legacy"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rebuild_temp_table_name_uses_unique_suffix() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, legacy TEXT)",
         (),
@@ -224,10 +211,10 @@ async fn rebuild_temp_table_name_uses_unique_suffix() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn plan_only_does_not_mutate() {
-    let (_db, conn) = empty_db().await;
-    let desired = SchemaSnapshot::from_schema_sql(test_schema())
+    let (_db, conn) = common::empty_db().await;
+    let desired = SchemaSnapshot::from_schema_sql(common::test_schema())
         .await
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
@@ -240,12 +227,12 @@ async fn plan_only_does_not_mutate() {
     assert!(still_empty.tables.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn empty_plan_for_matching_schemas() {
-    let (_db, conn) = empty_db().await;
-    conn.execute_batch(test_schema()).await.unwrap();
+    let (_db, conn) = common::empty_db().await;
+    conn.execute_batch(common::test_schema()).await.unwrap();
 
-    let desired = SchemaSnapshot::from_schema_sql(test_schema())
+    let desired = SchemaSnapshot::from_schema_sql(common::test_schema())
         .await
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
@@ -254,9 +241,9 @@ async fn empty_plan_for_matching_schemas() {
     assert!(plan.is_empty(), "Plan should be empty for matching schemas");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn add_notnull_default_column_execution() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute("CREATE TABLE foo (id TEXT PRIMARY KEY)", ())
         .await
         .unwrap();
@@ -286,9 +273,9 @@ async fn add_notnull_default_column_execution() {
     assert!(foo.columns.iter().any(|c| c.name == "status"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn fk_referenced_table_rebuild_preserves_integrity() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE parent (id TEXT PRIMARY KEY, name TEXT, old_col TEXT)",
         (),
@@ -332,9 +319,9 @@ async fn fk_referenced_table_rebuild_preserves_integrity() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn fts_index_created_outside_transaction() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let schema_with_fts = "\
         CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT);\n\
         CREATE INDEX idx_docs_fts ON docs USING fts (title, body);";
@@ -367,9 +354,9 @@ async fn fts_index_created_outside_transaction() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn materialized_view_recreated_after_table_change() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let schema_v1 = "\
         CREATE TABLE items (id TEXT PRIMARY KEY, category TEXT, old_col TEXT);\n\
         CREATE MATERIALIZED VIEW mv_counts AS SELECT category, COUNT(*) as cnt FROM items GROUP BY category;";
@@ -407,9 +394,9 @@ async fn materialized_view_recreated_after_table_change() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rebuild_recreates_all_views_not_just_dependent_ones() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let schema_v1 = "\
         CREATE TABLE items (id TEXT PRIMARY KEY, category TEXT, old_col TEXT);\n\
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);\n\
@@ -457,10 +444,10 @@ async fn rebuild_recreates_all_views_not_just_dependent_ones() {
     assert!(after.has_view("v_settings"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn full_schema_convergence_creates_all_objects() {
-    let (_db, conn) = empty_db().await;
-    let desired = SchemaSnapshot::from_schema_sql(test_schema())
+    let (_db, conn) = common::empty_db().await;
+    let desired = SchemaSnapshot::from_schema_sql(common::test_schema())
         .await
         .unwrap();
     let actual = SchemaSnapshot::from_connection(&conn).await.unwrap();
@@ -485,9 +472,9 @@ async fn full_schema_convergence_creates_all_objects() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rebuild_rejects_new_notnull_column_without_default() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute("CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT)", ())
         .await
         .unwrap();
@@ -511,9 +498,9 @@ async fn rebuild_rejects_new_notnull_column_without_default() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rebuild_with_notnull_default_column_applies_default() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT, old_col TEXT)",
         (),
@@ -551,9 +538,9 @@ async fn rebuild_with_notnull_default_column_applies_default() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rebuild_with_self_referential_fk_succeeds() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE categories (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT REFERENCES categories(id), old_col INTEGER)",
         (),
@@ -594,9 +581,9 @@ async fn rebuild_with_self_referential_fk_succeeds() {
     assert_eq!(row2.get::<String>(1).unwrap(), "1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn view_creation_retries_handle_string_literal_false_dependencies() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let desired_sql = "\
         CREATE TABLE base (id TEXT PRIMARY KEY, name TEXT NOT NULL);\n\
         CREATE VIEW v1 AS SELECT id, 'v2' AS marker FROM base;\n\
@@ -615,7 +602,7 @@ async fn view_creation_retries_handle_string_literal_false_dependencies() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rebuild_handles_if_not_exists_in_create_table() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, val TEXT)",
@@ -646,7 +633,7 @@ async fn rebuild_handles_if_not_exists_in_create_table() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_plan_rejects_when_lease_owner_mismatch() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -685,7 +672,7 @@ async fn execute_plan_rejects_when_lease_owner_mismatch() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_plan_rejects_when_lease_is_expired() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",

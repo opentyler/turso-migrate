@@ -1,17 +1,7 @@
+mod common;
+
 use turso_converge::schema::SchemaSnapshot;
 use turso_converge::{compute_diff, converge};
-
-async fn empty_db() -> (turso::Database, turso::Connection) {
-    let db = turso::Builder::new_local(":memory:")
-        .experimental_index_method(true)
-        .experimental_materialized_views(true)
-        .experimental_triggers(true)
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    (db, conn)
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn diff_detects_new_trigger() {
@@ -77,7 +67,7 @@ async fn diff_detects_changed_trigger() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn trigger_created_via_execution() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
 
     let schema = "\
         CREATE TABLE audit_log (id INTEGER PRIMARY KEY, msg TEXT);\n\
@@ -105,7 +95,7 @@ async fn trigger_created_via_execution() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn trigger_dropped_when_removed_from_schema() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
 
     let schema_v1 = "\
         CREATE TABLE audit_log (id INTEGER PRIMARY KEY, msg TEXT);\n\
@@ -138,7 +128,7 @@ async fn trigger_dropped_when_removed_from_schema() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn trigger_recreated_on_table_rebuild() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
 
     let schema_v1 = "\
         CREATE TABLE audit_log (id INTEGER PRIMARY KEY, msg TEXT);\n\

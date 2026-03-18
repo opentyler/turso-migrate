@@ -1,15 +1,6 @@
-use turso_converge::{SchemaSnapshot, compute_diff, converge};
+mod common;
 
-async fn empty_db() -> (turso::Database, turso::Connection) {
-    let db = turso::Builder::new_local(":memory:")
-        .experimental_index_method(true)
-        .experimental_materialized_views(true)
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    (db, conn)
-}
+use turso_converge::{SchemaSnapshot, compute_diff, converge};
 
 fn next_lcg(seed: &mut u64) -> u64 {
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -52,7 +43,7 @@ fn schema_from_seed(seed: u64) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deterministic_fuzz_schemas_converge_and_stabilize() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
 
     for seed in 1u64..=40 {
         let schema = schema_from_seed(seed);

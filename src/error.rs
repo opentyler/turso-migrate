@@ -1,3 +1,4 @@
+/// Errors returned by convergence, plan execution, and schema validation.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrateError {
     #[error("turso error: {0}")]

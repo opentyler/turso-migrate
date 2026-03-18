@@ -175,13 +175,14 @@ Called from `increment_schema_version()` with `unwrap_or(0)` which masks the rea
 **Impact**: If a user has a table named `my-table` or `user.data`, it will be invisible to the migration engine
 **Fix**: Accept quoted identifiers or at minimum log a warning
 
-#### 11. View `is_materialized` detection is fragile
+#### 11. View `is_materialized` detection is fragile (FIXED)
 
 **File**: `src/introspect.rs:128`
 **Issue**: Detects materialized views by `sql.to_lowercase().contains("materialized")`. A regular view with "materialized" in a string literal or comment would be misclassified.
 
 **Impact**: Low probability but could cause incorrect view handling
 **Fix**: Check for `"create materialized view"` prefix specifically
+**Status**: FIXED - now uses `is_materialized_view_sql()` which tokenizes and checks for `CREATE MATERIALIZED VIEW` prefix (case-insensitive)
 
 #### 12. `normalize_sql` for diff comparison is too aggressive
 
@@ -207,17 +208,20 @@ Called from `increment_schema_version()` with `unwrap_or(0)` which masks the rea
 - `DATA_VERSION` is 0, `converge_data()` is a no-op
 - Framework exists but does nothing
 
-#### 15. Duplicated test helpers across test files
+#### 15. Duplicated test helpers across test files (FIXED)
 - `empty_db()`, `test_schema()`, `get_meta()` are copy-pasted across 7 test files
 - Should extract to a shared `tests/common/mod.rs`
+- **Status**: FIXED - shared helpers extracted to `tests/common/mod.rs`, all test files use `common::` imports
 
-#### 16. Inconsistent test runtime annotations
+#### 16. Inconsistent test runtime annotations (FIXED)
 - Some tests use `#[tokio::test]`, others `#[tokio::test(flavor = "multi_thread")]`
 - Should standardize on `multi_thread` since Turso requires it
+- **Status**: FIXED - all tests now use `#[tokio::test(flavor = "multi_thread")]`
 
-#### 17. No doc comments on public API
+#### 17. No doc comments on public API (FIXED)
 - Public functions and types lack `///` documentation
 - `README.md` covers usage well but rustdoc is empty
+- **Status**: FIXED - all public structs, enums, traits, and functions now have `///` doc comments
 
 ---
 

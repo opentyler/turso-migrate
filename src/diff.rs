@@ -3,6 +3,7 @@ use std::fmt;
 use crate::options::ColumnRenameHint;
 use crate::schema::{ColumnInfo, SchemaSnapshot, TableInfo};
 
+/// Categorized differences between desired and actual database schemas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDiff {
     pub tables_to_create: Vec<String>,
@@ -168,6 +169,7 @@ pub(crate) fn normalize_sql(sql: &str) -> String {
     result.trim().to_string()
 }
 
+/// Normalize schema SQL for BLAKE3 hashing (strips comments, collapses whitespace, preserves literals).
 pub fn normalize_for_hash(sql: &str) -> String {
     let mut normalized = normalize_sql(sql);
     while normalized.ends_with(';') {
@@ -247,10 +249,12 @@ fn can_add_column(col: &ColumnInfo) -> bool {
     col.pk == 0 && (!col.notnull || col.default_value.is_some()) && !col.is_generated
 }
 
+/// Compute schema diff without rename hints.
 pub fn compute_diff(desired: &SchemaSnapshot, actual: &SchemaSnapshot) -> SchemaDiff {
     compute_diff_with_hints(desired, actual, &[])
 }
 
+/// Compute schema diff with optional column rename detection hints.
 pub fn compute_diff_with_hints(
     desired: &SchemaSnapshot,
     actual: &SchemaSnapshot,

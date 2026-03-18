@@ -120,7 +120,7 @@ impl SchemaSnapshot {
                 continue;
             }
             let sql: String = row.get(1)?;
-            let is_materialized = sql.to_ascii_lowercase().contains("materialized");
+            let is_materialized = is_materialized_view_sql(&sql);
 
             views.insert(
                 CIString::new(&name),
@@ -377,6 +377,14 @@ fn parse_version(s: &str) -> (u32, u32, u32) {
 fn is_meta_table(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == "_schema_meta" || lower == "_turso_migrations"
+}
+
+fn is_materialized_view_sql(sql: &str) -> bool {
+    let tokens: Vec<&str> = sql.split_whitespace().take(3).collect();
+    tokens.len() == 3
+        && tokens[0].eq_ignore_ascii_case("create")
+        && tokens[1].eq_ignore_ascii_case("materialized")
+        && tokens[2].eq_ignore_ascii_case("view")
 }
 
 fn is_internal_object(name: &str) -> bool {

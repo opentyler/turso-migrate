@@ -1,31 +1,18 @@
+mod common;
+
 use turso_converge::{
     ConvergeMode, ConvergeOptions, ConvergePolicy, SchemaSnapshot, converge_with_options,
 };
 
-fn test_schema() -> &'static str {
-    include_str!("fixtures/schema.sql")
-}
-
-async fn empty_db() -> (turso::Database, turso::Connection) {
-    let db = turso::Builder::new_local(":memory:")
-        .experimental_index_method(true)
-        .experimental_materialized_views(true)
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    (db, conn)
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn dry_run_does_not_execute() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let options = ConvergeOptions {
         policy: ConvergePolicy::permissive(),
         dry_run: true,
         ..Default::default()
     };
-    let report = converge_with_options(&conn, test_schema(), &options)
+    let report = converge_with_options(&conn, common::test_schema(), &options)
         .await
         .unwrap();
     assert!(!report.plan_sql.is_empty());
@@ -37,12 +24,12 @@ async fn dry_run_does_not_execute() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn converge_creates_schema() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let options = ConvergeOptions {
         policy: ConvergePolicy::permissive(),
         ..Default::default()
     };
-    let report = converge_with_options(&conn, test_schema(), &options)
+    let report = converge_with_options(&conn, common::test_schema(), &options)
         .await
         .unwrap();
     assert!(report.had_changes());
@@ -53,12 +40,12 @@ async fn converge_creates_schema() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn safe_policy_keeps_extra_tables() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let permissive = ConvergeOptions {
         policy: ConvergePolicy::permissive(),
         ..Default::default()
     };
-    converge_with_options(&conn, test_schema(), &permissive)
+    converge_with_options(&conn, common::test_schema(), &permissive)
         .await
         .unwrap();
 
@@ -73,7 +60,7 @@ async fn safe_policy_keeps_extra_tables() {
     .unwrap();
 
     let safe = ConvergeOptions::default();
-    let result = converge_with_options(&conn, test_schema(), &safe).await;
+    let result = converge_with_options(&conn, common::test_schema(), &safe).await;
     assert!(result.is_err(), "Safe policy should block table drops");
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
@@ -85,12 +72,12 @@ async fn safe_policy_keeps_extra_tables() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn permissive_policy_drops_extra_tables() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     let permissive = ConvergeOptions {
         policy: ConvergePolicy::permissive(),
         ..Default::default()
     };
-    converge_with_options(&conn, test_schema(), &permissive)
+    converge_with_options(&conn, common::test_schema(), &permissive)
         .await
         .unwrap();
 
@@ -104,7 +91,7 @@ async fn permissive_policy_drops_extra_tables() {
     .await
     .unwrap();
 
-    let report = converge_with_options(&conn, test_schema(), &permissive)
+    let report = converge_with_options(&conn, common::test_schema(), &permissive)
         .await
         .unwrap();
     assert_eq!(report.tables_dropped, 1);

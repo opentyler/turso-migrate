@@ -1,23 +1,10 @@
+mod common;
+
 use turso_converge::{SchemaSnapshot, bridge_legacy, converge};
-
-fn test_schema() -> &'static str {
-    include_str!("fixtures/schema.sql")
-}
-
-async fn empty_db() -> (turso::Database, turso::Connection) {
-    let db = turso::Builder::new_local(":memory:")
-        .experimental_index_method(true)
-        .experimental_materialized_views(true)
-        .build()
-        .await
-        .unwrap();
-    let conn = db.connect().unwrap();
-    (db, conn)
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fresh_db_no_bridge_needed() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         (),
@@ -31,7 +18,7 @@ async fn fresh_db_no_bridge_needed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn legacy_db_gets_bridged() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         (),
@@ -61,7 +48,7 @@ async fn legacy_db_gets_bridged() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn already_bridged_db_skips() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         (),
@@ -87,7 +74,7 @@ async fn already_bridged_db_skips() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_convergence_with_legacy_db() {
-    let (_db, conn) = empty_db().await;
+    let (_db, conn) = common::empty_db().await;
     conn.execute(
         "CREATE TABLE _turso_migrations (version INTEGER, name TEXT, applied_at TEXT)",
         (),
@@ -95,7 +82,7 @@ async fn full_convergence_with_legacy_db() {
     .await
     .unwrap();
 
-    converge(&conn, test_schema()).await.unwrap();
+    converge(&conn, common::test_schema()).await.unwrap();
 
     let snap = SchemaSnapshot::from_connection(&conn).await.unwrap();
     assert_eq!(snap.tables.len(), 10);

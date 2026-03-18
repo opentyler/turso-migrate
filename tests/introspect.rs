@@ -1,16 +1,14 @@
+mod common;
+
 use turso_converge::SchemaSnapshot;
 
-fn test_schema() -> &'static str {
-    include_str!("fixtures/schema.sql")
-}
-
 async fn pristine_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot::from_schema_sql(test_schema())
+    SchemaSnapshot::from_schema_sql(common::test_schema())
         .await
         .expect("pristine snapshot")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_contains_all_tables() {
     let snap = pristine_snapshot().await;
     let expected = [
@@ -31,7 +29,7 @@ async fn snapshot_contains_all_tables() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_captures_columns() {
     let snap = pristine_snapshot().await;
     let docs = snap.get_table("documents").expect("documents table");
@@ -66,7 +64,7 @@ async fn snapshot_captures_columns() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_captures_vector_columns() {
     let snap = pristine_snapshot().await;
     let docs = snap.get_table("documents").expect("documents table");
@@ -81,7 +79,7 @@ async fn snapshot_captures_vector_columns() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_captures_standard_indexes() {
     let snap = pristine_snapshot().await;
     let standard: Vec<_> = snap.indexes.values().filter(|i| !i.is_fts).collect();
@@ -94,7 +92,7 @@ async fn snapshot_captures_standard_indexes() {
     assert!(snap.has_index("idx_tags_tag"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_detects_fts_indexes() {
     let snap = pristine_snapshot().await;
     let fts: Vec<_> = snap.indexes.values().filter(|i| i.is_fts).collect();
@@ -105,7 +103,7 @@ async fn snapshot_detects_fts_indexes() {
     assert_eq!(docs_fts.table_name, "documents");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_captures_materialized_views() {
     let snap = pristine_snapshot().await;
     assert!(snap.views.len() >= 4, "Should have at least 4 views");
@@ -114,7 +112,7 @@ async fn snapshot_captures_materialized_views() {
     assert!(mv.is_materialized, "mv_type_counts should be materialized");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_filters_internal_objects() {
     let snap = pristine_snapshot().await;
     for name in snap.tables.keys() {
@@ -139,7 +137,7 @@ async fn snapshot_filters_internal_objects() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn two_pristine_snapshots_are_equal() {
     let snap1 = pristine_snapshot().await;
     let snap2 = pristine_snapshot().await;
@@ -149,7 +147,7 @@ async fn two_pristine_snapshots_are_equal() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_captures_foreign_keys() {
     let snap = pristine_snapshot().await;
     let tags = snap.get_table("document_tags").expect("document_tags");
@@ -160,7 +158,7 @@ async fn snapshot_captures_foreign_keys() {
     assert_eq!(tags.foreign_keys[0].to_table, "documents");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_detects_table_properties() {
     let snap = pristine_snapshot().await;
     let docs = snap.get_table("documents").expect("documents");
@@ -169,15 +167,15 @@ async fn snapshot_detects_table_properties() {
     assert!(!docs.has_autoincrement, "documents has no AUTOINCREMENT");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_cache_reuses_normalized_schema_hash() {
     SchemaSnapshot::clear_snapshot_cache_for_tests();
     assert_eq!(SchemaSnapshot::snapshot_cache_len_for_tests(), 0);
 
-    let formatted = format!("\n\n{}\n", test_schema());
+    let formatted = format!("\n\n{}\n", common::test_schema());
     let commented = format!(
         "-- same schema with comment\n{}\n-- trailing",
-        test_schema()
+        common::test_schema()
     );
 
     let _ = SchemaSnapshot::from_schema_sql(&formatted).await.unwrap();
@@ -192,7 +190,7 @@ async fn snapshot_cache_reuses_normalized_schema_hash() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn snapshot_filters_capability_probe_artifacts() {
     let db = turso::Builder::new_local(":memory:")
         .experimental_index_method(true)

@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::error::MigrateError;
 use crate::plan::MigrationPlan;
 
+/// Execute a migration plan with default 5-second busy timeout.
 pub async fn execute_plan(
     conn: &turso::Connection,
     plan: &MigrationPlan,
@@ -26,6 +27,7 @@ pub async fn set_busy_timeout(
     Ok(())
 }
 
+/// Execute a migration plan with configurable busy timeout and lease verification.
 pub async fn execute_plan_with_timeout(
     conn: &turso::Connection,
     plan: &MigrationPlan,

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Explicit hint for column rename detection when heuristics are ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnRenameHint {
     pub table: String,
@@ -10,12 +11,14 @@ pub struct ColumnRenameHint {
     pub to: String,
 }
 
+/// Idempotent post-DDL data migration step, tracked by `id` in `_schema_meta`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataMigration {
     pub id: String,
     pub statements: Vec<String>,
 }
 
+/// Destructive changes detected in a migration plan (tables/columns to drop or rebuild).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DestructiveChangeSet {
     pub tables_to_drop: Vec<String>,
@@ -54,6 +57,7 @@ impl DestructiveChangeSet {
 pub type PreDestructiveHook =
     Arc<dyn Fn(&DestructiveChangeSet) -> Result<(), String> + Send + Sync + 'static>;
 
+/// Test-only crash injection points for verifying crash recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failpoint {
     BeforeIntrospect,
@@ -71,6 +75,7 @@ impl Failpoint {
     }
 }
 
+/// Controls which destructive changes are allowed during convergence.
 #[derive(Debug, Clone)]
 pub struct ConvergePolicy {
     pub allow_table_drops: bool,
@@ -101,6 +106,7 @@ impl ConvergePolicy {
     }
 }
 
+/// Full configuration for `converge_with_options`: policy, dry-run, timeouts, hooks.
 #[derive(Clone)]
 pub struct ConvergeOptions {
     pub policy: ConvergePolicy,
@@ -149,6 +155,7 @@ impl Default for ConvergeOptions {
     }
 }
 
+/// Post-convergence report: what changed, how long it took, which mode ran.
 #[derive(Debug, Clone)]
 pub struct ConvergeReport {
     pub mode: ConvergeMode,
@@ -184,6 +191,7 @@ impl Default for ConvergeReport {
     }
 }
 
+/// How the convergence completed: fast-path, slow-path, dry-run, crash recovery, or no-op.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConvergeMode {
     FastPath,

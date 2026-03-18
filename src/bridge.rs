@@ -1,5 +1,6 @@
 use crate::error::MigrateError;
 
+/// Detect and mark legacy `_turso_migrations` table as bridged.
 pub async fn bridge_legacy(conn: &turso::Connection) -> Result<bool, MigrateError> {
     let has_legacy = table_exists(conn, "_turso_migrations").await?;
     if !has_legacy {

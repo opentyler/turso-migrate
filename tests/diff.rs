@@ -1,13 +1,11 @@
+mod common;
+
 use std::collections::BTreeMap;
 
 use turso_converge::diff::{compute_diff, compute_diff_with_hints};
 use turso_converge::{
     CIString, ColumnInfo, ColumnRenameHint, IndexInfo, SchemaSnapshot, TableInfo, ViewInfo,
 };
-
-fn test_schema() -> &'static str {
-    include_str!("fixtures/schema.sql")
-}
 
 fn empty_snapshot() -> SchemaSnapshot {
     SchemaSnapshot {
@@ -475,9 +473,9 @@ fn changed_view_detected() {
     assert_eq!(diff.views_to_create, vec!["v".to_string()]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn pristine_vs_empty_produces_full_create() {
-    let desired = SchemaSnapshot::from_schema_sql(test_schema())
+    let desired = SchemaSnapshot::from_schema_sql(common::test_schema())
         .await
         .expect("pristine snapshot");
     let actual = empty_snapshot();
