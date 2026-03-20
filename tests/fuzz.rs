@@ -11,7 +11,7 @@ fn schema_from_seed(seed: u64) -> String {
     let mut s = seed;
     let mut cols = vec!["id TEXT PRIMARY KEY".to_string()];
     for name in ["title", "status", "owner", "tag", "note"] {
-        if next_lcg(&mut s) % 2 == 0 {
+        if next_lcg(&mut s).is_multiple_of(2) {
             cols.push(format!("{name} TEXT"));
         }
     }
@@ -32,7 +32,7 @@ fn schema_from_seed(seed: u64) -> String {
         .map(ToString::to_string)
         .collect();
 
-    if !candidates.is_empty() && next_lcg(&mut s) % 2 == 0 {
+    if !candidates.is_empty() && next_lcg(&mut s).is_multiple_of(2) {
         let idx = (next_lcg(&mut s) as usize) % candidates.len();
         let col = &candidates[idx];
         sql.push_str(&format!("\nCREATE INDEX idx_fuzz_{col} ON fuzz({col});"));
