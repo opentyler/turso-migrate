@@ -7,7 +7,7 @@
 mod common;
 
 use turso_converge::{
-    SchemaSnapshot, compute_diff, converge, converge_with_options, ConvergeOptions, ConvergePolicy,
+    ConvergeOptions, ConvergePolicy, SchemaSnapshot, compute_diff, converge, converge_with_options,
 };
 
 // ── Same CHECK constraint produces no diff (no-op) ─────────────────
