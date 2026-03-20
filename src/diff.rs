@@ -300,6 +300,10 @@ pub fn compute_diff_with_hints(
         let mut missing_desired: Vec<ColumnInfo> = Vec::new();
         let mut renamed_columns: Vec<(String, String)> = Vec::new();
 
+        if desired_table.check_constraints != actual_table.check_constraints {
+            needs_rebuild = true;
+        }
+
         for actual_col in &actual_table.columns {
             if actual_col.is_hidden {
                 continue;
