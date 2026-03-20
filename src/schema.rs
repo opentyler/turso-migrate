@@ -119,6 +119,7 @@ pub struct TableInfo {
     pub sql: String,
     pub columns: Vec<ColumnInfo>,
     pub foreign_keys: Vec<ForeignKey>,
+    pub check_constraints: Vec<String>,
     pub is_strict: bool,
     pub is_without_rowid: bool,
     pub has_autoincrement: bool,

@@ -55,6 +55,7 @@ impl SchemaSnapshot {
             let is_without_rowid = detect_without_rowid(&sql);
 
             enrich_columns_with_collation(&sql, &mut columns);
+            let check_constraints = extract_check_constraints(&sql);
 
             tables.insert(
                 CIString::new(&name),
@@ -63,6 +64,7 @@ impl SchemaSnapshot {
                     sql,
                     columns,
                     foreign_keys,
+                    check_constraints,
                     is_strict,
                     is_without_rowid,
                     has_autoincrement,
@@ -778,6 +780,124 @@ fn enrich_columns_with_collation(create_sql: &str, columns: &mut [ColumnInfo]) {
     }
 }
 
+fn extract_check_constraints(create_sql: &str) -> Vec<String> {
+    let lower = create_sql.to_ascii_lowercase();
+    let bytes = create_sql.as_bytes();
+    let lower_bytes = lower.as_bytes();
+    let mut checks = Vec::new();
+    let mut idx = 0;
+
+    while idx < lower_bytes.len() {
+        if bytes[idx] == b'\'' {
+            idx += 1;
+            while idx < bytes.len() {
+                if bytes[idx] == b'\'' {
+                    idx += 1;
+                    if idx < bytes.len() && bytes[idx] == b'\'' {
+                        idx += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    idx += 1;
+                }
+            }
+            continue;
+        }
+
+        if bytes[idx] == b'"' {
+            idx += 1;
+            while idx < bytes.len() && bytes[idx] != b'"' {
+                idx += 1;
+            }
+            if idx < bytes.len() {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if idx + 1 < bytes.len() && bytes[idx] == b'-' && bytes[idx + 1] == b'-' {
+            while idx < bytes.len() && bytes[idx] != b'\n' {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if idx + 1 < bytes.len() && bytes[idx] == b'/' && bytes[idx + 1] == b'*' {
+            idx += 2;
+            while idx + 1 < bytes.len() && !(bytes[idx] == b'*' && bytes[idx + 1] == b'/') {
+                idx += 1;
+            }
+            if idx + 1 < bytes.len() {
+                idx += 2;
+            }
+            continue;
+        }
+
+        if lower_bytes[idx..].starts_with(b"check") {
+            let before = if idx > 0 { bytes[idx - 1] } else { b' ' };
+            let after_pos = idx + 5;
+            let after = if after_pos < bytes.len() {
+                bytes[after_pos]
+            } else {
+                b' '
+            };
+            if (before.is_ascii_alphanumeric() || before == b'_')
+                || (after.is_ascii_alphanumeric() || after == b'_')
+            {
+                idx += 1;
+                continue;
+            }
+
+            let mut pos = after_pos;
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+
+            if pos < bytes.len() && bytes[pos] == b'(' {
+                let paren_start = pos;
+                let mut depth = 1;
+                pos += 1;
+                while pos < bytes.len() && depth > 0 {
+                    match bytes[pos] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        b'\'' => {
+                            pos += 1;
+                            while pos < bytes.len() {
+                                if bytes[pos] == b'\'' {
+                                    pos += 1;
+                                    if pos < bytes.len() && bytes[pos] == b'\'' {
+                                        pos += 1;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    pos += 1;
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    pos += 1;
+                }
+
+                let check_expr = &create_sql[paren_start..pos];
+                let normalized = crate::diff::normalize_sql(check_expr);
+                checks.push(normalized);
+                idx = pos;
+                continue;
+            }
+        }
+
+        idx += 1;
+    }
+
+    checks.sort();
+    checks
+}
+
 fn find_column_section(lower_sql: &str, col_pattern: &str) -> Option<String> {
     let pos = lower_sql.find(col_pattern)?;
     let after = &lower_sql[pos..];
@@ -805,7 +925,7 @@ fn snapshot_cache_put(hash: String, snapshot: SchemaSnapshot) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_fk_references_from_sql;
+    use super::{extract_check_constraints, parse_fk_references_from_sql};
 
     #[test]
     fn parse_fk_references_skips_literals_and_comments() {
@@ -841,5 +961,58 @@ mod tests {
         let tables: Vec<String> = refs.into_iter().map(|fk| fk.to_table).collect();
 
         assert_eq!(tables, vec!["parent".to_string()]);
+    }
+
+    #[test]
+    fn extract_check_column_level() {
+        let sql = "CREATE TABLE t (id TEXT PRIMARY KEY, val INTEGER CHECK(val >= 0))";
+        let checks = extract_check_constraints(sql);
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].contains("val >= 0"), "got: {}", checks[0]);
+    }
+
+    #[test]
+    fn extract_check_table_level() {
+        let sql = "CREATE TABLE t (a TEXT, b TEXT, CHECK(a != b))";
+        let checks = extract_check_constraints(sql);
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].contains("a != b"), "got: {}", checks[0]);
+    }
+
+    #[test]
+    fn extract_check_multiple() {
+        let sql = "CREATE TABLE t (a INTEGER CHECK(a > 0), b INTEGER, CHECK(a != b))";
+        let checks = extract_check_constraints(sql);
+        assert_eq!(checks.len(), 2);
+    }
+
+    #[test]
+    fn extract_check_skips_string_literals() {
+        let sql = "CREATE TABLE t (a TEXT DEFAULT 'CHECK(fake)', b INTEGER CHECK(b > 0))";
+        let checks = extract_check_constraints(sql);
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].contains("b > 0"), "got: {}", checks[0]);
+    }
+
+    #[test]
+    fn extract_check_nested_parens() {
+        let sql = "CREATE TABLE t (a TEXT CHECK(json_valid(a) AND json_type(a) = 'object'))";
+        let checks = extract_check_constraints(sql);
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].contains("json_valid"), "got: {}", checks[0]);
+    }
+
+    #[test]
+    fn extract_check_word_boundary() {
+        let sql = "CREATE TABLE t (checkbox TEXT, val INTEGER CHECK(val > 0))";
+        let checks = extract_check_constraints(sql);
+        assert_eq!(checks.len(), 1, "should not match 'checkbox': {:?}", checks);
+    }
+
+    #[test]
+    fn extract_check_none() {
+        let sql = "CREATE TABLE t (id TEXT PRIMARY KEY, name TEXT)";
+        let checks = extract_check_constraints(sql);
+        assert!(checks.is_empty());
     }
 }

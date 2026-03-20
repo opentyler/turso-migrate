@@ -41,6 +41,7 @@ fn make_table(name: &str, columns: Vec<ColumnInfo>) -> TableInfo {
         sql: format!("CREATE TABLE {name} (...)"),
         columns,
         foreign_keys: vec![],
+        check_constraints: vec![],
         is_strict: false,
         is_without_rowid: false,
         has_autoincrement: false,
