@@ -19,12 +19,12 @@ Traditional migrations:           turso-converge:
 ```toml
 [dependencies]
 turso-converge = { git = "https://github.com/opentyler/turso-converge" }
-turso = "0.5.0-pre.13"
-turso_core = { version = "0.5.0-pre.13", features = ["fts", "fs"] }
+turso = "0.6.0-pre.3"
+turso_core = { version = "0.6.0-pre.3", features = ["fts", "fs"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
-Requires **Rust 1.85+** (edition 2024) and a **Tokio multi-thread** runtime.
+Requires **Rust 1.88+** (edition 2024) and a **Tokio multi-thread** runtime.
 
 ## Quick Start
 
@@ -84,7 +84,7 @@ converge() called
          1. Acquire migration lease
          2. Build desired snapshot (in-memory DB from SQL)
          3. Introspect actual database
-         4. Compute diff (14 categories)
+         4. Compute diff (15 categories)
          5. Check policy → validate safety → generate plan
          6. Execute in 3 phases (DDL → FTS → views/triggers)
          7. Atomically update hash + version
@@ -379,12 +379,14 @@ turso-converge is designed to be safe by default:
 |---------|-------|
 | Tables (CREATE, ALTER, DROP) | FK-ordered creation, policy-controlled drops |
 | Standard indexes | |
+| Partial indexes (`WHERE` clause) | Diffed via normalized SQL; WHERE changes trigger drop + recreate |
 | FTS indexes (`USING fts`) | Turso tantivy engine, 3-phase execution |
 | Vector columns (`vector32`) | Diffed and preserved during rebuilds |
 | Materialized views | Turso IVM |
 | Regular views | Dependency-ordered, fixed-point resolution |
 | Triggers | |
 | Foreign keys | PRAGMA-based + SQL fallback detection |
+| CHECK constraints | Parsed from DDL; changes trigger table rebuild |
 | COLLATE clauses | Detected via DDL parsing |
 | GENERATED columns | Excluded from data copy |
 | STRICT / WITHOUT ROWID | Detected from DDL |
@@ -444,7 +446,7 @@ All operations return `Result<_, MigrateError>`:
 cargo test
 ```
 
-159 tests. In-memory Turso databases, no external services.
+186 tests. In-memory Turso databases, no external services.
 
 ## Full Documentation
 
@@ -453,7 +455,7 @@ See **[DOCUMENTATION.md](DOCUMENTATION.md)** for the comprehensive reference, in
 - Complete API reference with exact signatures and source links
 - Configuration reference (all fields, defaults, types)
 - Schema type system (SchemaSnapshot, TableInfo, ColumnInfo, etc.)
-- Diff engine internals (14 categories, column classification rules, rename algorithm)
+- Diff engine internals (15 categories, column classification rules, rename algorithm)
 - Migration plan generation (statement ordering, FK topological sort, rebuild procedure)
 - Execution engine (3-phase execution, view fixed-point resolution, lease verification)
 - Safety feature details (each mechanism explained in depth)
@@ -462,18 +464,9 @@ See **[DOCUMENTATION.md](DOCUMENTATION.md)** for the comprehensive reference, in
 - Internal state table (`_schema_meta` keys)
 - Architecture and module map
 
-## Background
+## How Does It Compare?
 
-Rust implementation of the approach from David Rothlis and William Manley's [Simple declarative schema migration for SQLite](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) (2022), extended with:
-
-- Triggers and views (with dependency ordering)
-- Turso tantivy FTS with 3-phase execution
-- Vector columns (`vector32`)
-- BLAKE3 hash fast-path + drift detection
-- Crash recovery with phase cursor
-- Policy enforcement and NOT NULL validation
-- Cooperative migration lease with atomic phase-guarded refresh
-- Structured tracing and detailed reporting
+See **[COMPARISON.md](COMPARISON.md)** for a detailed comparison of turso-converge, the `turso` crate (database driver), and SQLx for SQLite — covering schema management philosophy, migration strategy, type safety, and when to use each.
 
 ## License
 

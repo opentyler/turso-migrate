@@ -99,7 +99,6 @@
 - [Supported Features](#supported-features)
 - [Known Limitations](#known-limitations)
 - [Testing](#testing)
-- [Background](#background)
 
 ---
 
@@ -129,8 +128,8 @@ turso-converge is distributed as a git dependency (not published to crates.io).
 # Cargo.toml
 [dependencies]
 turso-converge = { git = "https://github.com/opentyler/turso-converge" }
-turso = "0.5.0-pre.13"
-turso_core = { version = "0.5.0-pre.13", features = ["fts", "fs"] }
+turso = "0.6.0-pre.3"
+turso_core = { version = "0.6.0-pre.3", features = ["fts", "fs"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -139,7 +138,7 @@ tokio = { version = "1", features = ["full"] }
 | Requirement | Version |
 |-------------|---------|
 | Rust edition | 2024 |
-| Minimum Rust version | 1.85+ |
+| Minimum Rust version | 1.88+ |
 | Async runtime | Tokio (multi-thread flavor) |
 | Database | Turso |
 
@@ -254,7 +253,7 @@ The full convergence algorithm (implemented in [`src/converge.rs`](src/converge.
 5. **Pending data migrations**: If new `DataMigration` entries exist that haven't been applied, force the execution path.
 6. **Lease acquisition**: Acquire a cooperative migration lease to prevent concurrent migrations.
 7. **Introspection**: Build a `SchemaSnapshot` from the desired schema SQL (using an in-memory Turso database) and from the live database.
-8. **Diff computation**: Compare the two snapshots across 14 categories.
+8. **Diff computation**: Compare the two snapshots across 15 categories.
 9. **Policy check**: If destructive changes are present and the policy forbids them, return `PolicyViolation`.
 10. **Backup hook**: If `backup_before_destructive` is set and destructive changes are present, write a SQL backup.
 11. **Pre-destructive hook**: If a callback is registered, invoke it with the destructive change set.
@@ -836,7 +835,7 @@ All maps use `CIString` keys for case-insensitive lookup (matching Turso's case-
 
 ### TableInfo
 
-Parsed table metadata. Source: [`src/schema.rs:116-125`](src/schema.rs).
+Parsed table metadata. Source: [`src/schema.rs:116-126`](src/schema.rs).
 
 ```rust
 pub struct TableInfo {
@@ -844,6 +843,7 @@ pub struct TableInfo {
     pub sql: String,
     pub columns: Vec<ColumnInfo>,
     pub foreign_keys: Vec<ForeignKey>,
+    pub check_constraints: Vec<String>,
     pub is_strict: bool,
     pub is_without_rowid: bool,
     pub has_autoincrement: bool,
@@ -856,6 +856,7 @@ pub struct TableInfo {
 | `sql` | The full `CREATE TABLE` DDL statement. |
 | `columns` | Column metadata from `PRAGMA table_xinfo`. |
 | `foreign_keys` | Foreign key constraints from `PRAGMA foreign_key_list` (with SQL-based fallback). |
+| `check_constraints` | CHECK constraint expressions parsed from the DDL, normalized via `normalize_sql`. Includes both column-level (`CHECK(val > 0)`) and table-level (`CHECK(a != b)`) constraints. Sorted for stable comparison. |
 | `is_strict` | Whether the table uses `STRICT` mode. Detected from the DDL suffix. |
 | `is_without_rowid` | Whether the table uses `WITHOUT ROWID`. Detected from DDL. |
 | `has_autoincrement` | Whether any column uses `AUTOINCREMENT`. Detected from DDL. |
@@ -1084,13 +1085,13 @@ pub struct SchemaDiff {
 
 ### Diff Categories
 
-The diff engine evaluates 14 categories across 4 object types:
+The diff engine evaluates 15 categories across 4 object types:
 
 | # | Category | Condition |
 |---|----------|-----------|
 | 1 | `tables_to_create` | Table in desired but not in actual |
 | 2 | `tables_to_drop` | Table in actual but not in desired |
-| 3 | `tables_to_rebuild` | Table exists in both but has incompatible column changes (type, nullability, default, PK, collation, or generated status changed) |
+| 3 | `tables_to_rebuild` | Table exists in both but has incompatible column changes (type, nullability, default, PK, collation, generated status, or CHECK constraints changed) |
 | 4 | `columns_to_add` | Column in desired table but not in actual, and eligible for `ALTER TABLE ADD COLUMN` |
 | 5 | `columns_to_drop` | Column in actual table but not in desired, and eligible for `ALTER TABLE DROP COLUMN` |
 | 6 | `columns_to_rename` | Column detected as renamed (via heuristic or explicit hint) |
@@ -1108,6 +1109,7 @@ The diff engine evaluates 14 categories across 4 object types:
 When a table exists in both desired and actual schemas, the diff engine classifies each column difference:
 
 **Triggers a table rebuild:**
+- CHECK constraints changed (added, removed, or modified — compared as normalized, sorted lists)
 - Column type changed (case-insensitive comparison)
 - Nullability changed (`NOT NULL` added or removed)
 - Default value changed (compared via SQL normalization)
@@ -1149,7 +1151,7 @@ If multiple candidates exist or positions don't match, the automatic heuristic d
 
 ### Index and View Diffing
 
-**Indexes** are compared by normalized SQL. If the SQL changed OR the parent table is being rebuilt, the index is dropped and recreated. FTS indexes are tracked separately because they require non-transactional execution.
+**Indexes** are compared by normalized SQL. If the SQL changed OR the parent table is being rebuilt, the index is dropped and recreated. This includes **partial indexes** — a change to the `WHERE` clause (e.g., `WHERE deleted = 0` → `WHERE deleted = 0 AND active = 1`) is detected as a SQL change and triggers drop + recreate. FTS indexes are tracked separately because they require non-transactional execution.
 
 **Views** are compared by normalized SQL. If the SQL changed, the view is dropped and recreated. When any table is rebuilt, ALL views are dropped and recreated (because views may reference rebuilt tables).
 
@@ -1840,8 +1842,8 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `turso` | 0.5.0-pre.13 | Turso database client |
-| `turso_core` | 0.5.0-pre.13 | Core database features (FTS, filesystem, raw connection API) |
+| `turso` | 0.6.0-pre.3 | Turso database client |
+| `turso_core` | 0.6.0-pre.3 | Core database features (FTS, filesystem, raw connection API) |
 | `blake3` | 1 | Fast cryptographic hashing for change detection |
 | `tracing` | 0.1 | Structured logging at key decision points |
 | `thiserror` | 2 | Derive macro for `MigrateError` |
@@ -1855,12 +1857,14 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 |---------|---------|-------|
 | Tables (CREATE, ALTER, DROP) | Full | FK-ordered creation, policy-controlled drops |
 | Standard indexes | Full | Created/dropped/recreated as needed |
+| Partial indexes (`WHERE` clause) | Full | WHERE clause changes detected via normalized SQL comparison |
 | FTS indexes (tantivy, `USING fts`) | Full | Non-transactional phase, `WITH` clause support |
 | Vector columns (`vector32`) | Full | Diffed and preserved during rebuilds |
 | Materialized views (IVM) | Full | Treated as views with `is_materialized` flag |
 | Regular views | Full | Dependency-ordered creation, fixed-point resolution |
 | Triggers | Full | Dropped/recreated on rebuilt tables |
 | Foreign keys (PRAGMA-based detection) | Full | With SQL-based fallback parser |
+| CHECK constraints | Full | Parsed from DDL; column-level, table-level, and function-based CHECKs; changes trigger table rebuild |
 | COLLATE clauses | Full | Detected via DDL pattern matching |
 | GENERATED columns | Full | Excluded from data copy during rebuilds |
 | STRICT tables | Full | Detected from DDL |
@@ -1925,7 +1929,7 @@ Connection → [from_connection] → SchemaSnapshot (actual)
 cargo test
 ```
 
-159 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement (all four policy fields), dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, unsupported feature detection, NoOp mode, migration lease contention, protected table namespace, data integrity verification, and index functionality verification.
+186 tests covering: convergence, diff (including rename hints), plan generation, execution (3 phases + rename path + view retry), introspection (table_xinfo + TVF batching fallback), schema round-trip, policy enforcement (all four policy fields), dry-run, drift detection, rollback, backup hook, idempotent data migrations, read-only guards, failpoint crash scaffolding, deterministic fuzzing, SQL normalization, triggers, connection abstraction wrappers, unsupported feature detection, NoOp mode, migration lease contention, protected table namespace, data integrity verification, index functionality verification, CHECK constraint tracking and diffing, and partial index WHERE clause handling.
 
 All tests use in-memory Turso databases — no external services, no network, no test fixtures to set up.
 
@@ -1939,37 +1943,16 @@ All tests use in-memory Turso databases — no external services, no network, no
 | `tests/diff.rs` | 23 | Diff computation, rename detection, SQL normalization |
 | `tests/new_api.rs` | 16 | `converge_with_options`, policy, dry-run, backup, hooks |
 | `tests/introspect.rs` | 12 | `table_xinfo`, batched introspection, snapshot caching |
+| `tests/check_constraints.rs` | 11 | CHECK constraint tracking: same/modified/added/removed, column-level, table-level, function-based, end-to-end convergence, whitespace normalization |
+| `tests/partial_indexes.rs` | 9 | Partial index WHERE clause: same/changed/added/removed WHERE, end-to-end convergence, plan verification, idempotency, whitespace normalization |
 | `tests/triggers.rs` | 6 | Trigger creation, rebuild, drop |
 | `tests/migrator.rs` | 4 | End-to-end migration scenarios |
 | `tests/fuzz.rs` | 1 | Deterministic fuzzing of schema round-trips |
 | `src/bin/turso-converge.rs` | 1 | CLI trigger DDL support |
-| `src/introspect.rs` | 2 | FK parser edge cases |
+| `src/introspect.rs` | 9 | FK parser edge cases, CHECK constraint extraction (7 parser unit tests) |
 | `src/execute.rs` | 5 | Statement classification (view/trigger detection) |
 
-**CI:** GitHub Actions runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push and pull request using Rust 1.85. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-
----
-
-## Background
-
-turso-converge is a Rust implementation of the approach described in David Rothlis and William Manley's [Simple declarative schema migration for SQLite](https://david.rothlis.net/declarative-schema-migration-for-sqlite/) (2022).
-
-turso-converge extends the original with:
-
-| Area | Original (Python) | turso-converge |
-|------|-------------------|---------------|
-| Triggers & views | Not supported | Full support with dependency ordering |
-| FTS indexes | N/A | Turso tantivy FTS with 3-phase execution |
-| Vector columns | N/A | `vector32(N)` diffed and preserved |
-| Change detection | Always full introspection | BLAKE3 hash + drift detection (<1ms) |
-| Crash recovery | None | `migration_in_progress` flag + phase cursor + internal temp table filtering |
-| FK handling | Basic | PRAGMA-based detection, deferred checks, post-rebuild validation |
-| Introspection | `PRAGMA table_info` | `PRAGMA table_xinfo` + `index_list` + `foreign_key_list` |
-| Schema model | Basic columns | COLLATE, GENERATED, UNIQUE, STRICT, WITHOUT ROWID, AUTOINCREMENT |
-| Safety | None | Policy enforcement, NOT NULL validation, protected namespaces |
-| API | Single function | `converge` + `converge_with_options` + `SchemaDiff` Display |
-| Observability | None | Structured tracing + `ConvergeReport` |
-| Concurrency | None | Cooperative migration lease with TTL and phase-guarded refresh |
+**CI:** GitHub Actions runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push and pull request using Rust 1.88. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 
